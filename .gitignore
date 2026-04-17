@@ -1,0 +1,27 @@
+# Rust
+target/
+Cargo.lock
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+*.so
+*.whl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# R-PGO artifacts
+profiles/
+*.json
+!configs/*.yaml
+
+# OS
+.DS_Store

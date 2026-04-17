@@ -1,0 +1,12 @@
+# R-PGO config: Mixtral-8x7B (prior art baseline)
+model_id: "mistralai/Mixtral-8x7B-v0.1"
+calibration_samples: 2048
+max_length: 512
+batch_size: 1
+dataset_name: "wikitext"
+dataset_config: "wikitext-103-raw-v1"
+dataset_split: "train"
+output_path: "profiles/mixtral-8x7b.json"
+
+# 8 experts, top-2 routing, 32 layers
+# INT4: ~24GB, tight fit on A10G

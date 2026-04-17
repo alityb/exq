@@ -1,0 +1,25 @@
+[package]
+name = "rpgo"
+version = "0.1.0"
+edition = "2021"
+description = "Routing-Profile-Guided Optimization: a compiler framework for MoE inference"
+license = "Apache-2.0"
+
+[lib]
+name = "rpgo_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.25", features = ["extension-module"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ordered-float = { version = "5", features = ["serde"] }
+thiserror = "2"
+rayon = "1.10"
+
+[dev-dependencies]
+approx = "0.5"
+
+[profile.release]
+lto = true
+codegen-units = 1

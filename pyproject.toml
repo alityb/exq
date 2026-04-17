@@ -1,0 +1,36 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rpgo"
+version = "0.1.0"
+description = "Routing-Profile-Guided Optimization: a compiler framework for MoE inference"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "maturin>=1.0",
+]
+profile = [
+    "transformers>=4.40",
+    "datasets>=2.18",
+    "accelerate>=0.28",
+]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "."
+module-name = "rpgo._core"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

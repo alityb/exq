@@ -1,0 +1,12 @@
+# R-PGO config: Qwen3-30B-A3B (primary dev target)
+model_id: "Qwen/Qwen3-30B-A3B"
+calibration_samples: 2048
+max_length: 512
+batch_size: 1
+dataset_name: "wikitext"
+dataset_config: "wikitext-103-raw-v1"
+dataset_split: "train"
+output_path: "profiles/qwen3-30b-a3b.json"
+
+# Expected: 48 MoE layers, 128 experts/layer, top-8 routing
+# INT4 size: ~15GB, fits in A10G 24GB with headroom
