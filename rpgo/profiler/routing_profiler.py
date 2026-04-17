@@ -211,36 +211,73 @@ class RoutingProfiler:
         order_idx = self._layer_to_order_idx[layer_idx]
         prev_layer_idx = self._moe_layer_order[order_idx - 1] if order_idx > 0 else None
 
-        def hook(module: nn.Module, input: Any, output: torch.Tensor):
-            # output: router logits [batch, seq_len, n_experts] or [batch*seq, n_experts]
+        def hook(module: nn.Module, input: Any, output):
+            # Gate output varies by architecture:
+            #   - Raw tensor: logits [batch*seq, n_experts]
+            #   - Tuple: (logits, routing_weights, selected_experts) — Qwen3
+            #   - Tuple: (routing_weights, selected_experts) — some variants
             with torch.no_grad():
-                logits = output
-                if logits.dim() == 3:
-                    logits = logits.reshape(-1, logits.size(-1))  # [tokens, n_experts]
-                elif logits.dim() == 1:
-                    logits = logits.unsqueeze(0)  # [1, n_experts]
+                topk_indices = None
 
-                n_tokens = logits.size(0)
-                topk_indices = logits.topk(min(top_k, logits.size(-1)), dim=-1).indices  # [tokens, top_k]
+                if isinstance(output, tuple):
+                    # Try to find selected_experts (int tensor) or logits (float tensor)
+                    for elem in reversed(output):
+                        if isinstance(elem, torch.Tensor) and elem.dtype in (
+                            torch.int64, torch.int32, torch.long,
+                        ):
+                            # This is selected_experts — already top-k indices
+                            topk_indices = elem
+                            break
+
+                    if topk_indices is None:
+                        # Fall back to first float tensor as logits
+                        for elem in output:
+                            if isinstance(elem, torch.Tensor) and elem.is_floating_point():
+                                logits = elem
+                                break
+                        else:
+                            return  # can't parse output
+                else:
+                    logits = output
+
+                if topk_indices is not None:
+                    # Already have selected expert indices
+                    if topk_indices.dim() == 1:
+                        topk_indices = topk_indices.unsqueeze(0)
+                    if topk_indices.dim() == 3:
+                        topk_indices = topk_indices.reshape(-1, topk_indices.size(-1))
+                else:
+                    # Have logits — need to compute top-k
+                    if logits.dim() == 3:
+                        logits = logits.reshape(-1, logits.size(-1))
+                    elif logits.dim() == 1:
+                        logits = logits.unsqueeze(0)
+                    topk_indices = logits.topk(min(top_k, logits.size(-1)), dim=-1).indices
+
+                n_tokens = topk_indices.size(0)
+                actual_k = topk_indices.size(1)
 
                 # Update per-expert activation counts
-                for token_idx in range(n_tokens):
-                    experts = topk_indices[token_idx].tolist()
-                    for e in experts:
-                        lp.increment_expert(e)
+                # Vectorized: flatten all expert indices and count via bincount
+                flat_experts = topk_indices.reshape(-1).cpu()
+                for e in flat_experts.tolist():
+                    lp.increment_expert(e)
 
-                    # Co-activation tracking: compare with previous layer's selections
-                    if prev_layer_idx is not None and token_idx in self._prev_layer_experts:
-                        prev_experts = self._prev_layer_experts[token_idx]
-                        prev_lp = self._layer_profiles[prev_layer_idx]
-                        for src_e in prev_experts:
-                            for dst_e in experts:
-                                prev_lp.add_co_activation(src_e, dst_e)
+                # Co-activation tracking: compare with previous layer's selections
+                if prev_layer_idx is not None and self._prev_layer_experts:
+                    prev_lp = self._layer_profiles[prev_layer_idx]
+                    for token_idx in range(min(n_tokens, len(self._prev_layer_experts))):
+                        if token_idx in self._prev_layer_experts:
+                            prev_experts = self._prev_layer_experts[token_idx]
+                            curr_experts = topk_indices[token_idx].cpu().tolist()
+                            for src_e in prev_experts:
+                                for dst_e in curr_experts:
+                                    prev_lp.add_co_activation(src_e, dst_e)
 
                 # Store current layer's selections for next layer's co-activation
                 self._prev_layer_experts = {}
                 for token_idx in range(n_tokens):
-                    self._prev_layer_experts[token_idx] = topk_indices[token_idx].tolist()
+                    self._prev_layer_experts[token_idx] = topk_indices[token_idx].cpu().tolist()
 
                 self._total_tokens += n_tokens
 

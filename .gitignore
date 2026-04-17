@@ -20,6 +20,7 @@ build/
 # R-PGO artifacts
 profiles/
 *.json
+!routing_profile.json
 !configs/*.yaml
 
 # Spec
