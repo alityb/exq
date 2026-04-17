@@ -18,6 +18,8 @@ from rpgo._core import (
     RoutingGraphNode,
     RoutingProfile,
     SpecializationPlan,
+    py_build_routing_graph,
+    py_graph_summary,
 )
 
 __all__ = [
@@ -32,4 +34,6 @@ __all__ = [
     "RoutingGraphNode",
     "RoutingProfile",
     "SpecializationPlan",
+    "py_build_routing_graph",
+    "py_graph_summary",
 ]

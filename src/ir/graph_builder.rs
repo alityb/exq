@@ -2,6 +2,7 @@
 
 use crate::ir::routing_graph::{RoutingGraph, RoutingGraphEdge, RoutingGraphNode};
 use crate::profile::{LayerProfile, RoutingProfile};
+use pyo3::prelude::*;
 
 /// Default expert weight size estimate (bytes) when unknown.
 /// Qwen3-30B-A3B: ~30MB per expert block.
@@ -71,6 +72,27 @@ pub fn build_routing_graph_with_config(
     }
 
     graph
+}
+
+// ---------------------------------------------------------------------------
+// PyO3 wrapper
+// ---------------------------------------------------------------------------
+
+/// Build a RoutingGraph from a RoutingProfile (callable from Python).
+#[pyfunction]
+#[pyo3(signature = (profile, expert_size_bytes=30_000_000, arithmetic_intensity=100.0))]
+pub fn py_build_routing_graph(
+    profile: &crate::profile::PyRoutingProfile,
+    expert_size_bytes: u64,
+    arithmetic_intensity: f64,
+) -> crate::ir::routing_graph::PyRoutingGraph {
+    crate::ir::routing_graph::PyRoutingGraph {
+        inner: build_routing_graph_with_config(
+            &profile.inner,
+            expert_size_bytes,
+            arithmetic_intensity,
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------

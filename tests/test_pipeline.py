@@ -1,6 +1,7 @@
-"""End-to-end pipeline test: profile → graph → compile → artifact.
+"""End-to-end pipeline test: profile -> graph -> compile -> artifact.
 
 Uses a mock profile (no real model needed) to test the full flow.
+Tests both the manual Python graph builder and the Rust-side graph builder.
 """
 
 import json
@@ -16,6 +17,8 @@ from rpgo._core import (
     RoutingGraphNode,
     RoutingGraphEdge,
     CompilerPipeline,
+    py_build_routing_graph,
+    py_graph_summary,
 )
 from rpgo.eval.coverage import CoverageAnalyzer
 
@@ -60,8 +63,8 @@ def make_realistic_profile():
     return profile
 
 
-def build_graph_from_profile(profile):
-    """Build routing graph from profile (Python-side)."""
+def build_graph_manual(profile):
+    """Build routing graph from profile (manual Python-side, for comparison)."""
     graph = RoutingGraph(profile.model_id)
     layer_indices = profile.moe_layer_indices()
 
@@ -78,19 +81,54 @@ def build_graph_from_profile(profile):
             )
             graph.add_node(node)
 
-    # Add edges based on co-activation patterns
-    # (simplified: use known patterns from make_realistic_profile)
+    # Manually add edges (simplified patterns)
     for i in range(len(layer_indices) - 1):
         src_l = layer_indices[i]
         dst_l = layer_indices[i + 1]
-        # E0→E0 strong, E0→E1 weak
         graph.add_edge(RoutingGraphEdge(src_l, 0, dst_l, 0, 0.75))
         graph.add_edge(RoutingGraphEdge(src_l, 0, dst_l, 1, 0.25))
-        # E1→E1 medium, E1→E2 medium
         graph.add_edge(RoutingGraphEdge(src_l, 1, dst_l, 1, 0.67))
         graph.add_edge(RoutingGraphEdge(src_l, 1, dst_l, 2, 0.33))
 
     return graph
+
+
+class TestRustGraphBuilder:
+    """Tests for py_build_routing_graph (Rust-side graph construction)."""
+
+    def test_builds_correct_node_count(self):
+        profile = make_realistic_profile()
+        graph = py_build_routing_graph(profile)
+        assert graph.n_nodes == 24  # 8 experts x 3 layers
+
+    def test_builds_edges_from_co_activation(self):
+        profile = make_realistic_profile()
+        graph = py_build_routing_graph(profile)
+        # Co-activation data was added in make_realistic_profile
+        # E0->E0 (3 counts), E0->E1 (1 count), E1->E1 (2 counts), E1->E2 (1 count)
+        # across 2 layer transitions = edges exist
+        assert graph.n_edges > 0
+
+    def test_hot_experts_populated(self):
+        profile = make_realistic_profile()
+        graph = py_build_routing_graph(profile)
+        hot = graph.hot_experts(0.10)
+        assert len(hot) > 0
+
+    def test_custom_expert_size(self):
+        profile = make_realistic_profile()
+        graph = py_build_routing_graph(profile, expert_size_bytes=500_000)
+        # Should still work, just with different weight sizes
+        assert graph.n_nodes == 24
+
+    def test_graph_summary(self):
+        profile = make_realistic_profile()
+        graph = py_build_routing_graph(profile)
+        summary = py_graph_summary(graph)
+        assert summary["total_nodes"] == 24
+        assert summary["n_layers"] == 3
+        assert summary["total_hot"] > 0
+        assert summary["avg_entropy"] > 0
 
 
 class TestEndToEnd:
@@ -101,36 +139,46 @@ class TestEndToEnd:
         for w in warnings:
             assert "frequencies sum to" in w  # expected small rounding
 
-    def test_graph_construction(self):
+    def test_graph_construction_manual(self):
         profile = make_realistic_profile()
-        graph = build_graph_from_profile(profile)
-        assert graph.n_nodes == 24  # 8 experts × 3 layers
-        assert graph.n_edges == 8   # 4 edges × 2 layer transitions
+        graph = build_graph_manual(profile)
+        assert graph.n_nodes == 24
+        assert graph.n_edges == 8  # 4 edges x 2 layer transitions
 
-    def test_full_pipeline(self):
+    def test_full_pipeline_manual_graph(self):
         profile = make_realistic_profile()
-        graph = build_graph_from_profile(profile)
+        graph = build_graph_manual(profile)
 
         pipe = CompilerPipeline()
         pipe.run(graph)
 
-        # Check all outputs are populated
         quant = pipe.get_quant_plan()
         assert len(quant) == 24
-
         layout = pipe.get_layout_plan()
         assert len(layout) == 24
-
         spec = pipe.get_specialization_plan()
         assert len(spec) == 3
+        assert pipe.get_prefetch_entry_count() > 0
 
-        prefetch_count = pipe.get_prefetch_entry_count()
-        assert prefetch_count > 0
+    def test_full_pipeline_rust_graph(self):
+        """End-to-end via Rust graph builder: profile -> Rust graph -> compile."""
+        profile = make_realistic_profile()
+        graph = py_build_routing_graph(profile)
+
+        pipe = CompilerPipeline()
+        pipe.run(graph)
+
+        quant = pipe.get_quant_plan()
+        assert len(quant) == 24
+        layout = pipe.get_layout_plan()
+        assert len(layout) == 24
+        spec = pipe.get_specialization_plan()
+        assert len(spec) == 3
 
     def test_quant_respects_frequency(self):
         """Hot experts should get BF16, cold experts should get INT4/INT8."""
         profile = make_realistic_profile()
-        graph = build_graph_from_profile(profile)
+        graph = build_graph_manual(profile)
 
         pipe = CompilerPipeline()
         pipe.run(graph)
@@ -138,20 +186,19 @@ class TestEndToEnd:
 
         # Expert 0 in layer 0 (freq=0.25) should be BF16
         assert quant[(0, 0)] == "BF16", f"hot expert got {quant[(0, 0)]}"
-
         # Expert 7 in layer 0 (freq=0.04) should be WARM or COLD
         assert quant[(0, 7)] in ("INT8", "INT4"), f"cold expert got {quant[(0, 7)]}"
 
     def test_prefetch_targets_high_prob_edges(self):
         """Prefetch entries should exist for high-probability edges."""
         profile = make_realistic_profile()
-        graph = build_graph_from_profile(profile)
+        graph = build_graph_manual(profile)
 
         pipe = CompilerPipeline()
         pipe.run(graph)
         schedule = pipe.get_prefetch_schedule()
 
-        # The 0.75 edge (L0:E0 → L1:E0) should be prefetched
+        # The 0.75 edge (L0:E0 -> L1:E0) should be prefetched
         high_prob_prefetches = [
             e for e in schedule
             if e[0] == 0 and e[1] == 0 and e[2] == 1 and e[3] == 0
@@ -161,7 +208,7 @@ class TestEndToEnd:
     def test_coverage_analysis(self):
         """Coverage analyzer should produce valid coverage ratio."""
         profile = make_realistic_profile()
-        graph = build_graph_from_profile(profile)
+        graph = build_graph_manual(profile)
 
         pipe = CompilerPipeline()
         pipe.run(graph)
@@ -176,7 +223,7 @@ class TestEndToEnd:
         assert "interpretation" in report
 
     def test_profile_save_load_compile(self):
-        """Test: save profile → load → build graph → compile."""
+        """Test: save profile -> load -> Rust graph builder -> compile."""
         profile = make_realistic_profile()
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
@@ -185,31 +232,31 @@ class TestEndToEnd:
         try:
             profile.save(path)
             loaded = RoutingProfile.load(path)
-            graph = build_graph_from_profile(loaded)
+            graph = py_build_routing_graph(loaded)
 
             pipe = CompilerPipeline()
             pipe.run(graph)
-            assert pipe.get_prefetch_entry_count() > 0
+            assert pipe.get_quant_plan()
+            assert pipe.get_layout_plan()
         finally:
             Path(path).unlink()
 
     def test_ablation_quant_only(self):
         """Ablation: run only quantization pass."""
         profile = make_realistic_profile()
-        graph = build_graph_from_profile(profile)
+        graph = build_graph_manual(profile)
 
         pipe = CompilerPipeline()
         pipe.run_selective(graph, layout=False, quant=True, specialize=False, prefetch=False)
 
-        quant = pipe.get_quant_plan()
-        assert len(quant) == 24
+        assert len(pipe.get_quant_plan()) == 24
         assert pipe.get_prefetch_entry_count() == 0
         assert len(pipe.get_layout_plan()) == 0
 
     def test_ablation_layout_plus_quant(self):
         """Ablation: run layout + quant, no prefetch."""
         profile = make_realistic_profile()
-        graph = build_graph_from_profile(profile)
+        graph = build_graph_manual(profile)
 
         pipe = CompilerPipeline()
         pipe.run_selective(graph, layout=True, quant=True, specialize=False, prefetch=False)

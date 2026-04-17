@@ -1,6 +1,5 @@
 # Rust
 target/
-Cargo.lock
 
 # Python
 __pycache__/
@@ -22,6 +21,9 @@ build/
 profiles/
 *.json
 !configs/*.yaml
+
+# Spec
+AGENTS.md
 
 # OS
 .DS_Store

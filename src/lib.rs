@@ -9,6 +9,7 @@ pub mod passes;
 pub mod profile;
 
 use pyo3::prelude::*;
+use pyo3::wrap_pyfunction;
 
 /// Python module entry-point: `rpgo._core`
 #[pymodule]
@@ -22,6 +23,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ir::PyRoutingGraphNode>()?;
     m.add_class::<ir::PyRoutingGraphEdge>()?;
     m.add_class::<ir::PyRoutingGraph>()?;
+
+    // -- IR functions --
+    m.add_function(wrap_pyfunction!(
+        ir::graph_builder::py_build_routing_graph,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(ir::graph_analysis::py_graph_summary, m)?)?;
 
     // -- passes --
     m.add_class::<passes::PyQuantPlan>()?;

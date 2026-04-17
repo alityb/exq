@@ -6,7 +6,7 @@ compiler's static prefetch schedule -- a metric unique to R-PGO.
 
 from __future__ import annotations
 
-from rpgo._core import RoutingGraph, RoutingGraphEdge, RoutingGraphNode
+from rpgo._core import RoutingGraph
 
 
 class CoverageAnalyzer:
@@ -32,6 +32,11 @@ class CoverageAnalyzer:
             src_l, src_e, dst_l, dst_e = entry[:4]
             self._prefetched.add((src_l, src_e, dst_l, dst_e))
 
+        # Pre-build frequency lookup: O(N) once instead of O(N) per edge
+        self._freq_map: dict[tuple[int, int], float] = {
+            (l, e): f for l, e, f in self.graph.hot_experts(0.0)
+        }
+
     def compute_coverage(self) -> float:
         """Compute the weighted prefetch coverage ratio.
 
@@ -46,14 +51,7 @@ class CoverageAnalyzer:
         total_mass = 0.0
 
         for src_l, src_e, dst_l, dst_e, prob in high_prob_edges:
-            # Get source node frequency
-            hot_experts = self.graph.hot_experts(0.0)  # all experts
-            src_freq = 0.0
-            for l, e, f in hot_experts:
-                if l == src_l and e == src_e:
-                    src_freq = f
-                    break
-
+            src_freq = self._freq_map.get((src_l, src_e), 0.0)
             weighted = src_freq * prob
             total_mass += weighted
 

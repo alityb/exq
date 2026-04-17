@@ -9,7 +9,6 @@ Usage:
 import argparse
 import json
 import logging
-import sys
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -27,16 +26,27 @@ def main():
     )
     args = parser.parse_args()
 
-    from rpgo._core import RoutingProfile, RoutingGraph, CompilerPipeline
+    from rpgo._core import (
+        RoutingProfile,
+        CompilerPipeline,
+        py_build_routing_graph,
+        py_graph_summary,
+    )
 
     logging.info(f"Loading profile: {args.profile}")
     profile = RoutingProfile.load(args.profile)
     logging.info(f"Profile: {profile.model_id}, {profile.n_layers} layers")
 
-    # Build routing graph from profile
-    # (for now, use the Python-side builder since graph_builder isn't exposed via PyO3 yet)
-    graph = _build_graph_from_profile(profile)
+    # Build routing graph via Rust core
+    graph = py_build_routing_graph(profile)
     logging.info(f"Routing graph: {graph.n_nodes} nodes, {graph.n_edges} edges")
+
+    # Print summary
+    summary = py_graph_summary(graph)
+    logging.info(
+        f"Graph summary: HOT={summary['total_hot']}, WARM={summary['total_warm']}, "
+        f"COLD={summary['total_cold']}, FROZEN={summary['total_frozen']}"
+    )
 
     # Run compiler pipeline
     pipeline = CompilerPipeline()
@@ -71,35 +81,6 @@ def main():
     with open(args.output, "w") as f:
         json.dump(artifact, f, indent=2)
     logging.info(f"Artifact saved to {args.output}")
-
-
-def _build_graph_from_profile(profile) -> "RoutingGraph":
-    """Build a RoutingGraph from a RoutingProfile (Python-side bridge).
-
-    TODO: Expose graph_builder via PyO3 for a single Rust call.
-    """
-    from rpgo._core import RoutingGraph, RoutingGraphNode, RoutingGraphEdge
-
-    graph = RoutingGraph(profile.model_id)
-    layer_indices = profile.moe_layer_indices()
-
-    for layer_idx in layer_indices:
-        lp = profile.get_layer(layer_idx)
-        freqs = lp.get_activation_freqs()
-        for expert_id, freq in enumerate(freqs):
-            node = RoutingGraphNode(
-                layer=layer_idx,
-                expert=expert_id,
-                activation_freq=freq,
-                routing_entropy=lp.routing_entropy,
-            )
-            graph.add_node(node)
-
-    # Edges would require co-activation data exposed from LayerProfile
-    # For now this creates the node-only graph; co-activation edges
-    # are populated when the Rust-side graph_builder is exposed via PyO3.
-
-    return graph
 
 
 if __name__ == "__main__":

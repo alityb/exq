@@ -2,4 +2,4 @@
 
 A compiler framework for Mixture-of-Experts inference.
 
-Rust core + Python boundary layer. See `AGENTS.md` for full specification.
+Rust core + Python boundary layer.

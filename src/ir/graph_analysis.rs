@@ -2,6 +2,7 @@
 //! frequency distribution stats, co-activation clustering hints.
 
 use crate::ir::routing_graph::RoutingGraph;
+use pyo3::prelude::*;
 use std::collections::HashMap;
 
 /// Per-layer summary statistics derived from the routing graph.
@@ -250,6 +251,100 @@ pub fn graph_summary(graph: &RoutingGraph) -> GraphSummary {
         prefetch_coverage_at_60: prefetch_coverage(graph, 0.60),
         prefetch_coverage_at_35: prefetch_coverage(graph, 0.35),
     }
+}
+
+// ---------------------------------------------------------------------------
+// PyO3 wrapper
+// ---------------------------------------------------------------------------
+
+/// Compute a full summary of the routing graph (callable from Python).
+/// Returns a dict with all summary fields.
+#[pyfunction]
+pub fn py_graph_summary(
+    graph: &crate::ir::routing_graph::PyRoutingGraph,
+) -> HashMap<String, PyObject> {
+    use pyo3::types::PyFloat;
+    let s = graph_summary(&graph.inner);
+    Python::with_gil(|py| {
+        let mut m = HashMap::new();
+        m.insert(
+            "model_id".into(),
+            s.model_id.into_pyobject(py).unwrap().into_any().unbind(),
+        );
+        m.insert(
+            "n_layers".into(),
+            s.n_layers.into_pyobject(py).unwrap().into_any().unbind(),
+        );
+        m.insert(
+            "total_nodes".into(),
+            s.total_nodes.into_pyobject(py).unwrap().into_any().unbind(),
+        );
+        m.insert(
+            "total_edges".into(),
+            s.total_edges.into_pyobject(py).unwrap().into_any().unbind(),
+        );
+        m.insert(
+            "total_hot".into(),
+            s.total_hot.into_pyobject(py).unwrap().into_any().unbind(),
+        );
+        m.insert(
+            "total_warm".into(),
+            s.total_warm.into_pyobject(py).unwrap().into_any().unbind(),
+        );
+        m.insert(
+            "total_cold".into(),
+            s.total_cold.into_pyobject(py).unwrap().into_any().unbind(),
+        );
+        m.insert(
+            "total_frozen".into(),
+            s.total_frozen
+                .into_pyobject(py)
+                .unwrap()
+                .into_any()
+                .unbind(),
+        );
+        m.insert(
+            "avg_entropy".into(),
+            PyFloat::new(py, s.avg_entropy).into_any().unbind(),
+        );
+        m.insert(
+            "min_entropy".into(),
+            PyFloat::new(py, s.min_entropy).into_any().unbind(),
+        );
+        m.insert(
+            "max_entropy".into(),
+            PyFloat::new(py, s.max_entropy).into_any().unbind(),
+        );
+        m.insert(
+            "low_entropy_layer_count".into(),
+            s.low_entropy_layer_count
+                .into_pyobject(py)
+                .unwrap()
+                .into_any()
+                .unbind(),
+        );
+        m.insert(
+            "high_prob_edge_count".into(),
+            s.high_prob_edge_count
+                .into_pyobject(py)
+                .unwrap()
+                .into_any()
+                .unbind(),
+        );
+        m.insert(
+            "prefetch_coverage_at_60".into(),
+            PyFloat::new(py, s.prefetch_coverage_at_60)
+                .into_any()
+                .unbind(),
+        );
+        m.insert(
+            "prefetch_coverage_at_35".into(),
+            PyFloat::new(py, s.prefetch_coverage_at_35)
+                .into_any()
+                .unbind(),
+        );
+        m
+    })
 }
 
 // ---------------------------------------------------------------------------
