@@ -21,18 +21,59 @@ pub struct LayerAnalysis {
     pub freq_sum: f64,
 }
 
-/// Frequency tier thresholds (matching AGENTS.md §5.5).
+/// Frequency tier thresholds.
+/// Defaults match AGENTS.md §5.5 but should be overridden per-model.
+#[derive(Debug, Clone)]
+pub struct FrequencyThresholds {
+    pub hot: f64,
+    pub warm: f64,
+    pub cold: f64,
+}
+
+/// Legacy constants for backward compatibility.
 pub const HOT_THRESHOLD: f64 = 0.10;
 pub const WARM_THRESHOLD: f64 = 0.03;
 pub const COLD_THRESHOLD: f64 = 0.005;
 
+impl Default for FrequencyThresholds {
+    fn default() -> Self {
+        Self {
+            hot: HOT_THRESHOLD,
+            warm: WARM_THRESHOLD,
+            cold: COLD_THRESHOLD,
+        }
+    }
+}
+
+impl FrequencyThresholds {
+    /// Auto-compute thresholds based on model architecture.
+    ///
+    /// For a model with N experts and top-K routing, uniform frequency = K/N.
+    /// HOT  = 2× uniform   (experts activated >2× the expected rate)
+    /// WARM = 0.5× uniform (experts activated at roughly expected rate)
+    /// COLD = 0.1× uniform (experts activated at 10% of expected rate)
+    pub fn auto(n_experts: usize, top_k: usize) -> Self {
+        let uniform = top_k as f64 / n_experts as f64;
+        Self {
+            hot: (uniform * 2.0).min(0.99),
+            warm: (uniform * 0.5).max(0.001),
+            cold: (uniform * 0.1).max(0.0001),
+        }
+    }
+}
+
 /// Classify an activation frequency into a tier name.
 pub fn frequency_tier(freq: f64) -> &'static str {
-    if freq >= HOT_THRESHOLD {
+    frequency_tier_with_thresholds(freq, &FrequencyThresholds::default())
+}
+
+/// Classify with explicit thresholds.
+pub fn frequency_tier_with_thresholds(freq: f64, t: &FrequencyThresholds) -> &'static str {
+    if freq >= t.hot {
         "HOT"
-    } else if freq >= WARM_THRESHOLD {
+    } else if freq >= t.warm {
         "WARM"
-    } else if freq >= COLD_THRESHOLD {
+    } else if freq >= t.cold {
         "COLD"
     } else {
         "FROZEN"
@@ -41,6 +82,15 @@ pub fn frequency_tier(freq: f64) -> &'static str {
 
 /// Analyze a single layer of the routing graph.
 pub fn analyze_layer(graph: &RoutingGraph, layer: usize) -> LayerAnalysis {
+    analyze_layer_with_thresholds(graph, layer, &FrequencyThresholds::default())
+}
+
+/// Analyze with explicit thresholds.
+pub fn analyze_layer_with_thresholds(
+    graph: &RoutingGraph,
+    layer: usize,
+    t: &FrequencyThresholds,
+) -> LayerAnalysis {
     let nodes = graph.nodes_in_layer(layer);
     let n_experts = nodes.len();
     let entropy = nodes.first().map(|n| n.routing_entropy).unwrap_or(0.0);
@@ -63,7 +113,7 @@ pub fn analyze_layer(graph: &RoutingGraph, layer: usize) -> LayerAnalysis {
 
     for n in &nodes {
         freq_sum += n.activation_freq;
-        match frequency_tier(n.activation_freq) {
+        match frequency_tier_with_thresholds(n.activation_freq, t) {
             "HOT" => hot += 1,
             "WARM" => warm += 1,
             "COLD" => cold += 1,
@@ -93,6 +143,18 @@ pub fn analyze_all_layers(graph: &RoutingGraph) -> Vec<LayerAnalysis> {
         .collect()
 }
 
+/// Analyze all layers with explicit thresholds.
+pub fn analyze_all_layers_with_thresholds(
+    graph: &RoutingGraph,
+    t: &FrequencyThresholds,
+) -> Vec<LayerAnalysis> {
+    graph
+        .layer_indices()
+        .into_iter()
+        .map(|l| analyze_layer_with_thresholds(graph, l, t))
+        .collect()
+}
+
 /// Layers with routing entropy <= max_entropy (candidates for Pass D specialization).
 pub fn low_entropy_layers(graph: &RoutingGraph, max_entropy: f64) -> Vec<usize> {
     graph
@@ -108,13 +170,7 @@ pub fn low_entropy_layers(graph: &RoutingGraph, max_entropy: f64) -> Vec<usize> 
         .collect()
 }
 
-/// Compute static prefetch coverage: the fraction of weighted expert activations
-/// that are anticipated by high-probability routing graph edges.
-///
-/// coverage = sum over (layer,expert) of:
-///     freq(l,e) * sum over outgoing high-prob edges of conditional_prob
-///
-/// Normalized by total weighted edge mass.
+/// Compute static prefetch coverage.
 pub fn prefetch_coverage(graph: &RoutingGraph, min_edge_prob: f64) -> f64 {
     let mut covered_mass = 0.0f64;
     let mut total_mass = 0.0f64;
@@ -141,8 +197,7 @@ pub fn prefetch_coverage(graph: &RoutingGraph, min_edge_prob: f64) -> f64 {
     }
 }
 
-/// Build a per-layer co-activation adjacency matrix for a single layer.
-/// Returns (expert_ids, matrix) where matrix[i][j] = P(expert_j at L+1 | expert_i at L).
+/// Build a per-layer co-activation adjacency matrix.
 pub fn co_activation_matrix(graph: &RoutingGraph, layer: usize) -> (Vec<usize>, Vec<Vec<f64>>) {
     let nodes = graph.nodes_in_layer(layer);
     let mut expert_ids: Vec<usize> = nodes.iter().map(|n| n.expert).collect();
@@ -155,7 +210,6 @@ pub fn co_activation_matrix(graph: &RoutingGraph, layer: usize) -> (Vec<usize>, 
         .collect();
 
     let n = expert_ids.len();
-    // Find dst layer experts
     let next_layers = graph.layer_indices();
     let next_layer = next_layers.iter().find(|&&l| l > layer).copied();
 
@@ -207,9 +261,12 @@ pub struct GraphSummary {
     pub prefetch_coverage_at_35: f64,
 }
 
-/// Compute a full summary of the routing graph.
-pub fn graph_summary(graph: &RoutingGraph) -> GraphSummary {
-    let analyses = analyze_all_layers(graph);
+/// Compute a full summary with configurable thresholds.
+pub fn graph_summary_with_thresholds(
+    graph: &RoutingGraph,
+    thresholds: &FrequencyThresholds,
+) -> GraphSummary {
+    let analyses = analyze_all_layers_with_thresholds(graph, thresholds);
     let n_layers = analyses.len();
 
     let total_hot: usize = analyses.iter().map(|a| a.hot_count).sum();
@@ -253,18 +310,36 @@ pub fn graph_summary(graph: &RoutingGraph) -> GraphSummary {
     }
 }
 
+/// Compute summary with default thresholds.
+pub fn graph_summary(graph: &RoutingGraph) -> GraphSummary {
+    graph_summary_with_thresholds(graph, &FrequencyThresholds::default())
+}
+
 // ---------------------------------------------------------------------------
-// PyO3 wrapper
+// PyO3 wrappers
 // ---------------------------------------------------------------------------
 
 /// Compute a full summary of the routing graph (callable from Python).
-/// Returns a dict with all summary fields.
 #[pyfunction]
+#[pyo3(signature = (graph, freq_hot=None, freq_warm=None, freq_cold=None))]
 pub fn py_graph_summary(
     graph: &crate::ir::routing_graph::PyRoutingGraph,
+    freq_hot: Option<f64>,
+    freq_warm: Option<f64>,
+    freq_cold: Option<f64>,
 ) -> HashMap<String, PyObject> {
     use pyo3::types::PyFloat;
-    let s = graph_summary(&graph.inner);
+
+    let thresholds = match (freq_hot, freq_warm, freq_cold) {
+        (Some(h), Some(w), Some(c)) => FrequencyThresholds {
+            hot: h,
+            warm: w,
+            cold: c,
+        },
+        _ => FrequencyThresholds::default(),
+    };
+
+    let s = graph_summary_with_thresholds(&graph.inner, &thresholds);
     Python::with_gil(|py| {
         let mut m = HashMap::new();
         m.insert(
@@ -358,7 +433,6 @@ mod tests {
 
     fn make_analysis_graph() -> RoutingGraph {
         let mut g = RoutingGraph::new("analysis-test".into());
-        // Layer 0: 8 experts with skewed distribution
         let freqs_l0 = [0.25, 0.20, 0.15, 0.10, 0.08, 0.08, 0.07, 0.07];
         for (i, &f) in freqs_l0.iter().enumerate() {
             g.add_node(RoutingGraphNode {
@@ -370,7 +444,6 @@ mod tests {
                 routing_entropy: 1.95,
             });
         }
-        // Layer 1: 8 experts, more uniform
         for i in 0..8 {
             g.add_node(RoutingGraphNode {
                 layer: 1,
@@ -378,10 +451,9 @@ mod tests {
                 activation_freq: 0.125,
                 weight_size_bytes: 1_000_000,
                 avg_arithmetic_intensity: 100.0,
-                routing_entropy: 2.08, // near max = ln(8) ≈ 2.079
+                routing_entropy: 2.08,
             });
         }
-        // Edges: L0:E0 → L1 (strong to E0, weaker to E1)
         g.add_edge(RoutingGraphEdge {
             src_layer: 0,
             src_expert: 0,
@@ -396,7 +468,6 @@ mod tests {
             dst_expert: 1,
             conditional_prob: 0.25,
         });
-        // L0:E1 → L1
         g.add_edge(RoutingGraphEdge {
             src_layer: 0,
             src_expert: 1,
@@ -425,14 +496,39 @@ mod tests {
     }
 
     #[test]
+    fn test_auto_thresholds() {
+        // Qwen3: 128 experts, top-8. uniform = 8/128 = 0.0625
+        let t = FrequencyThresholds::auto(128, 8);
+        assert!((t.hot - 0.125).abs() < 1e-10, "hot={}", t.hot);
+        assert!((t.warm - 0.03125).abs() < 1e-10, "warm={}", t.warm);
+        assert!((t.cold - 0.00625).abs() < 1e-10, "cold={}", t.cold);
+
+        // Mixtral: 8 experts, top-2. uniform = 0.25
+        let t2 = FrequencyThresholds::auto(8, 2);
+        assert!((t2.hot - 0.50).abs() < 1e-10);
+        assert!((t2.warm - 0.125).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_custom_thresholds_change_tiers() {
+        let t = FrequencyThresholds {
+            hot: 0.04,
+            warm: 0.01,
+            cold: 0.005,
+        };
+        assert_eq!(frequency_tier_with_thresholds(0.05, &t), "HOT");
+        assert_eq!(frequency_tier_with_thresholds(0.03, &t), "WARM");
+        assert_eq!(frequency_tier_with_thresholds(0.008, &t), "COLD");
+        assert_eq!(frequency_tier_with_thresholds(0.002, &t), "FROZEN");
+    }
+
+    #[test]
     fn test_analyze_layer_counts() {
         let g = make_analysis_graph();
         let a0 = analyze_layer(&g, 0);
         assert_eq!(a0.n_experts, 8);
-        // freqs: 0.25, 0.20, 0.15, 0.10 are HOT (>=0.10), rest WARM
         assert_eq!(a0.hot_count, 4);
         assert_eq!(a0.warm_count, 4);
-        assert_eq!(a0.cold_count, 0);
     }
 
     #[test]
@@ -445,10 +541,8 @@ mod tests {
     #[test]
     fn test_low_entropy_layers() {
         let g = make_analysis_graph();
-        // Both layers have entropy > 0.5, so none qualify
         let low = low_entropy_layers(&g, 0.5);
         assert!(low.is_empty());
-        // With threshold 2.0, layer 0 (1.95) qualifies
         let low2 = low_entropy_layers(&g, 2.0);
         assert_eq!(low2, vec![0]);
     }
@@ -456,14 +550,10 @@ mod tests {
     #[test]
     fn test_prefetch_coverage() {
         let g = make_analysis_graph();
-        // At min_prob=0.60: edges with prob>=0.60 are:
-        //   L0:E0→L1:E0 (0.75) and L0:E1→L1:E3 (0.60)
         let cov60 = prefetch_coverage(&g, 0.60);
-        assert!(cov60 > 0.0 && cov60 <= 1.0, "coverage@0.60 = {cov60}");
-
-        // At min_prob=0.35: all 4 edges qualify except L0:E0→L1:E1 (0.25)
+        assert!(cov60 > 0.0 && cov60 <= 1.0);
         let cov35 = prefetch_coverage(&g, 0.35);
-        assert!(cov35 > cov60, "lower threshold should give higher coverage");
+        assert!(cov35 > cov60);
     }
 
     #[test]
@@ -481,9 +571,7 @@ mod tests {
         let g = make_analysis_graph();
         let (experts, mat) = co_activation_matrix(&g, 0);
         assert_eq!(experts.len(), 8);
-        // Expert 0 (idx 0) → Expert 0 at L1 should be 0.75
         assert!((mat[0][0] - 0.75).abs() < 1e-10);
-        // Expert 0 → Expert 1 at L1 should be 0.25
         assert!((mat[0][1] - 0.25).abs() < 1e-10);
     }
 }

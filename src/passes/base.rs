@@ -1,13 +1,54 @@
 //! Base trait + pipeline orchestrator with DAG-parallel execution.
 
+use crate::ir::graph_analysis::FrequencyThresholds;
 use crate::ir::routing_graph::RoutingGraph;
 use pyo3::prelude::*;
 use std::collections::HashMap;
 
 use super::layout_planner::{run_layout_pass, LayoutPlan};
-use super::prefetch_emitter::{run_prefetch_pass, PrefetchSchedule};
-use super::quant_planner::{run_quant_pass, QuantPlan};
+use super::prefetch_emitter::{run_prefetch_pass_with_config, PrefetchConfig, PrefetchSchedule};
+use super::quant_planner::{run_quant_pass_with_config, QuantConfig, QuantPlan};
 use super::specialization::{run_specialization_pass, SpecializationPlan};
+
+/// Full configuration for the compiler pipeline.
+#[derive(Debug, Clone)]
+pub struct PipelineConfig {
+    pub quant: QuantConfig,
+    pub prefetch: PrefetchConfig,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            quant: QuantConfig::default(),
+            prefetch: PrefetchConfig::default(),
+        }
+    }
+}
+
+impl PipelineConfig {
+    /// Auto-configure based on model architecture.
+    pub fn auto(n_experts: usize, top_k: usize) -> Self {
+        Self {
+            quant: QuantConfig::auto(n_experts, top_k),
+            prefetch: PrefetchConfig::auto(n_experts, top_k),
+        }
+    }
+
+    /// Configure with explicit frequency thresholds.
+    pub fn with_thresholds(freq_hot: f64, freq_warm: f64, freq_cold: f64) -> Self {
+        Self {
+            quant: QuantConfig {
+                thresholds: FrequencyThresholds {
+                    hot: freq_hot,
+                    warm: freq_warm,
+                    cold: freq_cold,
+                },
+            },
+            prefetch: PrefetchConfig::default(),
+        }
+    }
+}
 
 /// Full output of the compiler pipeline.
 #[derive(Debug, Clone)]
@@ -18,20 +59,30 @@ pub struct CompilerOutput {
     pub prefetch: PrefetchSchedule,
 }
 
-/// Run the full 3-stage compiler pipeline.
-///
-/// Stage 1: A, B, D in parallel (rayon::join).
-/// Stage 2: C using outputs of A, B, D (parallel across layers internally).
-/// Stage 3: Assemble into CompilerOutput.
+/// Run the full 3-stage compiler pipeline with default config.
 pub fn run_pipeline(graph: &RoutingGraph) -> CompilerOutput {
-    // Stage 1: A, B, D are independent — run in parallel
+    run_pipeline_with_config(graph, &PipelineConfig::default())
+}
+
+/// Run with explicit config.
+pub fn run_pipeline_with_config(graph: &RoutingGraph, config: &PipelineConfig) -> CompilerOutput {
+    let quant_config = config.quant.clone();
+    let prefetch_config = config.prefetch.clone();
+
+    // Stage 1: A, B, D in parallel
     let (layout, (quant, specialization)) = rayon::join(
         || run_layout_pass(graph),
-        || rayon::join(|| run_quant_pass(graph), || run_specialization_pass(graph)),
+        || {
+            rayon::join(
+                || run_quant_pass_with_config(graph, &quant_config),
+                || run_specialization_pass(graph),
+            )
+        },
     );
 
     // Stage 2: C depends on all three
-    let prefetch = run_prefetch_pass(graph, &layout, &quant, &specialization);
+    let prefetch =
+        run_prefetch_pass_with_config(graph, &layout, &quant, &specialization, &prefetch_config);
 
     CompilerOutput {
         layout,
@@ -41,7 +92,7 @@ pub fn run_pipeline(graph: &RoutingGraph) -> CompilerOutput {
     }
 }
 
-/// Run only specific passes (for ablation studies).
+/// Run only specific passes.
 pub fn run_pipeline_selective(
     graph: &RoutingGraph,
     run_layout: bool,
@@ -49,13 +100,31 @@ pub fn run_pipeline_selective(
     run_specialize: bool,
     run_prefetch: bool,
 ) -> CompilerOutput {
+    run_pipeline_selective_with_config(
+        graph,
+        run_layout,
+        run_quant,
+        run_specialize,
+        run_prefetch,
+        &PipelineConfig::default(),
+    )
+}
+
+pub fn run_pipeline_selective_with_config(
+    graph: &RoutingGraph,
+    run_layout: bool,
+    run_quant: bool,
+    run_specialize: bool,
+    run_prefetch: bool,
+    config: &PipelineConfig,
+) -> CompilerOutput {
     let layout = if run_layout {
         run_layout_pass(graph)
     } else {
         LayoutPlan::default()
     };
     let quant = if run_quant {
-        run_quant_pass(graph)
+        run_quant_pass_with_config(graph, &config.quant)
     } else {
         QuantPlan::default()
     };
@@ -65,7 +134,7 @@ pub fn run_pipeline_selective(
         SpecializationPlan::default()
     };
     let prefetch = if run_prefetch {
-        run_prefetch_pass(graph, &layout, &quant, &specialization)
+        run_prefetch_pass_with_config(graph, &layout, &quant, &specialization, &config.prefetch)
     } else {
         PrefetchSchedule::default()
     };
@@ -79,10 +148,9 @@ pub fn run_pipeline_selective(
 }
 
 // ---------------------------------------------------------------------------
-// PyO3 wrapper: CompilerPipeline
+// PyO3 wrapper
 // ---------------------------------------------------------------------------
 
-/// Python-exposed compiler pipeline.
 #[pyclass(name = "CompilerPipeline")]
 pub struct PyCompilerPipeline {
     output: Option<CompilerOutput>,
@@ -95,12 +163,48 @@ impl PyCompilerPipeline {
         Self { output: None }
     }
 
-    /// Run the full pipeline on a RoutingGraph.
+    /// Run the full pipeline with default config.
     fn run(&mut self, graph: &crate::ir::PyRoutingGraph) {
         self.output = Some(run_pipeline(&graph.inner));
     }
 
-    /// Run selective passes for ablation.
+    /// Run with explicit frequency thresholds.
+    #[pyo3(signature = (graph, freq_hot=0.10, freq_warm=0.03, freq_cold=0.005, prefetch_high=0.70, prefetch_med=0.35, prefetch_min_freq=0.01))]
+    fn run_with_config(
+        &mut self,
+        graph: &crate::ir::PyRoutingGraph,
+        freq_hot: f64,
+        freq_warm: f64,
+        freq_cold: f64,
+        prefetch_high: f64,
+        prefetch_med: f64,
+        prefetch_min_freq: f64,
+    ) {
+        let config = PipelineConfig {
+            quant: QuantConfig {
+                thresholds: FrequencyThresholds {
+                    hot: freq_hot,
+                    warm: freq_warm,
+                    cold: freq_cold,
+                },
+            },
+            prefetch: PrefetchConfig {
+                high_prob_threshold: prefetch_high,
+                med_prob_threshold: prefetch_med,
+                min_src_freq: prefetch_min_freq,
+            },
+        };
+        self.output = Some(run_pipeline_with_config(&graph.inner, &config));
+    }
+
+    /// Run with auto-detected thresholds based on n_experts + top_k.
+    #[pyo3(signature = (graph, n_experts, top_k))]
+    fn run_auto(&mut self, graph: &crate::ir::PyRoutingGraph, n_experts: usize, top_k: usize) {
+        let config = PipelineConfig::auto(n_experts, top_k);
+        self.output = Some(run_pipeline_with_config(&graph.inner, &config));
+    }
+
+    /// Run selective passes.
     #[pyo3(signature = (graph, layout=true, quant=true, specialize=true, prefetch=true))]
     fn run_selective(
         &mut self,
@@ -119,7 +223,6 @@ impl PyCompilerPipeline {
         ));
     }
 
-    /// Get the quantization plan as {(layer, expert): precision_name}.
     fn get_quant_plan(&self) -> PyResult<HashMap<(usize, usize), String>> {
         let out = self
             .output
@@ -133,7 +236,6 @@ impl PyCompilerPipeline {
             .collect())
     }
 
-    /// Get the layout plan as {(layer, expert): memory_offset}.
     fn get_layout_plan(&self) -> PyResult<HashMap<(usize, usize), u64>> {
         let out = self
             .output
@@ -142,7 +244,6 @@ impl PyCompilerPipeline {
         Ok(out.layout.placements.clone())
     }
 
-    /// Get specialization decisions as {layer: kind}.
     fn get_specialization_plan(&self) -> PyResult<HashMap<usize, String>> {
         let out = self
             .output
@@ -156,7 +257,6 @@ impl PyCompilerPipeline {
             .collect())
     }
 
-    /// Get prefetch schedule entry count.
     fn get_prefetch_entry_count(&self) -> PyResult<usize> {
         let out = self
             .output
@@ -165,7 +265,6 @@ impl PyCompilerPipeline {
         Ok(out.prefetch.entries.len())
     }
 
-    /// Get prefetch schedule as list of (src_layer, src_expert, dst_layer, dst_expert, priority, size_bytes).
     fn get_prefetch_schedule(&self) -> PyResult<Vec<(usize, usize, usize, usize, String, u64)>> {
         let out = self
             .output
@@ -190,12 +289,12 @@ impl PyCompilerPipeline {
 
     fn __repr__(&self) -> String {
         match &self.output {
-            Some(o) => format!(
+            Some(o) => {
+                format!(
                 "CompilerPipeline(quant={} assignments, layout={} placements, prefetch={} entries)",
-                o.quant.assignments.len(),
-                o.layout.placements.len(),
-                o.prefetch.entries.len(),
-            ),
+                o.quant.assignments.len(), o.layout.placements.len(), o.prefetch.entries.len(),
+            )
+            }
             None => "CompilerPipeline(not run)".into(),
         }
     }
@@ -267,12 +366,34 @@ mod tests {
     fn test_full_pipeline_runs() {
         let g = make_pipeline_graph();
         let output = run_pipeline(&g);
-        // All passes produce non-empty output
         assert!(!output.quant.assignments.is_empty());
         assert!(!output.layout.placements.is_empty());
         assert!(!output.specialization.layer_decisions.is_empty());
-        // Prefetch should have entries since we have high-prob edges
         assert!(!output.prefetch.entries.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_with_config() {
+        let g = make_pipeline_graph();
+        let config = PipelineConfig::with_thresholds(0.30, 0.15, 0.05);
+        let output = run_pipeline_with_config(&g, &config);
+        // With hot=0.30, only experts 0 (0.35) and 1 (0.30) are BF16
+        let bf16_count = output
+            .quant
+            .assignments
+            .values()
+            .filter(|&&p| p == crate::passes::quant_planner::Precision::BF16)
+            .count();
+        assert_eq!(bf16_count, 6); // 2 experts × 3 layers
+    }
+
+    #[test]
+    fn test_auto_config() {
+        let g = make_pipeline_graph();
+        // 4 experts, top-2: uniform=0.50, hot=1.0 (capped at 0.99), warm=0.25
+        let config = PipelineConfig::auto(4, 2);
+        let output = run_pipeline_with_config(&g, &config);
+        assert!(!output.quant.assignments.is_empty());
     }
 
     #[test]

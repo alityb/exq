@@ -5,7 +5,7 @@
 //!
 //! Stage 1 pass — reads only from RoutingGraph, no dependencies on A/C/D.
 
-use crate::ir::graph_analysis;
+use crate::ir::graph_analysis::FrequencyThresholds;
 use crate::ir::routing_graph::RoutingGraph;
 use pyo3::prelude::*;
 use std::collections::HashMap;
@@ -20,7 +20,6 @@ pub enum Precision {
 }
 
 impl Precision {
-    /// Bytes per parameter for this precision.
     pub fn bytes_per_param(&self) -> f64 {
         match self {
             Precision::BF16 => 2.0,
@@ -30,8 +29,6 @@ impl Precision {
         }
     }
 
-    /// Relative quality cost (lower = better quality, higher = more compression).
-    /// Used as a proxy for quantization error weighting.
     pub fn error_weight(&self) -> f64 {
         match self {
             Precision::BF16 => 0.0,
@@ -45,46 +42,48 @@ impl Precision {
 /// Output of Pass B.
 #[derive(Debug, Clone, Default)]
 pub struct QuantPlan {
-    /// (layer, expert) → assigned precision.
     pub assignments: HashMap<(usize, usize), Precision>,
-    /// Estimated total memory in bytes.
     pub estimated_memory_bytes: u64,
-    /// Estimated weighted error: sum of freq * error_weight for each expert.
     pub estimated_weighted_error: f64,
 }
 
 /// Configuration for the quantization pass.
 #[derive(Debug, Clone)]
 pub struct QuantConfig {
-    pub hot_threshold: f64,
-    pub warm_threshold: f64,
-    pub cold_threshold: f64,
-    // Below cold_threshold = FROZEN
+    pub thresholds: FrequencyThresholds,
 }
 
 impl Default for QuantConfig {
     fn default() -> Self {
         Self {
-            hot_threshold: graph_analysis::HOT_THRESHOLD,   // 0.10
-            warm_threshold: graph_analysis::WARM_THRESHOLD, // 0.03
-            cold_threshold: graph_analysis::COLD_THRESHOLD, // 0.005
+            thresholds: FrequencyThresholds::default(),
         }
     }
 }
 
-/// Run the quantization planning pass.
+impl QuantConfig {
+    /// Auto-configure based on model architecture.
+    pub fn auto(n_experts: usize, top_k: usize) -> Self {
+        Self {
+            thresholds: FrequencyThresholds::auto(n_experts, top_k),
+        }
+    }
+}
+
+/// Run with default thresholds.
 pub fn run_quant_pass(graph: &RoutingGraph) -> QuantPlan {
     run_quant_pass_with_config(graph, &QuantConfig::default())
 }
 
+/// Run with explicit config.
 pub fn run_quant_pass_with_config(graph: &RoutingGraph, config: &QuantConfig) -> QuantPlan {
     let mut assignments = HashMap::new();
     let mut total_memory: u64 = 0;
     let mut weighted_error: f64 = 0.0;
 
     for node in graph.nodes.values() {
-        let precision = classify_precision(node.activation_freq, config);
-        let expert_params = node.weight_size_bytes as f64 / 2.0; // assume bf16 baseline → param count
+        let precision = classify_precision(node.activation_freq, &config.thresholds);
+        let expert_params = node.weight_size_bytes as f64 / 2.0;
         let expert_memory = (expert_params * precision.bytes_per_param()) as u64;
 
         total_memory += expert_memory;
@@ -101,15 +100,13 @@ pub fn run_quant_pass_with_config(graph: &RoutingGraph, config: &QuantConfig) ->
 }
 
 /// Classify an expert's precision tier based on activation frequency.
-fn classify_precision(freq: f64, config: &QuantConfig) -> Precision {
-    if freq >= config.hot_threshold {
+fn classify_precision(freq: f64, t: &FrequencyThresholds) -> Precision {
+    if freq >= t.hot {
         Precision::BF16
-    } else if freq >= config.warm_threshold {
+    } else if freq >= t.warm {
         Precision::INT8
-    } else if freq >= config.cold_threshold {
-        Precision::INT4
     } else {
-        Precision::INT4 // FROZEN: same precision, but flagged for load-on-demand
+        Precision::INT4
     }
 }
 
@@ -149,7 +146,6 @@ impl PyQuantPlan {
         self.inner.estimated_weighted_error
     }
 
-    /// Get precision for a specific (layer, expert).
     fn get_precision(&self, layer: usize, expert: usize) -> PyResult<String> {
         self.inner
             .assignments
@@ -162,7 +158,6 @@ impl PyQuantPlan {
             })
     }
 
-    /// Count of experts per precision tier.
     fn tier_counts(&self) -> HashMap<String, usize> {
         let mut counts = HashMap::new();
         for p in self.inner.assignments.values() {
@@ -206,8 +201,7 @@ mod tests {
     fn make_quant_graph() -> RoutingGraph {
         let mut g = RoutingGraph::new("quant-test".into());
         let test_data = [
-            // (expert, freq) — simulating 8 experts with skewed distribution
-            (0, 0.25),  // HOT
+            (0, 0.25),  // HOT  (default thresholds)
             (1, 0.20),  // HOT
             (2, 0.15),  // HOT
             (3, 0.10),  // HOT
@@ -221,7 +215,7 @@ mod tests {
                 layer: 0,
                 expert,
                 activation_freq: freq,
-                weight_size_bytes: 2_000_000, // 1M params × 2 bytes (bf16)
+                weight_size_bytes: 2_000_000,
                 avg_arithmetic_intensity: 100.0,
                 routing_entropy: 1.8,
             });
@@ -230,31 +224,24 @@ mod tests {
     }
 
     #[test]
-    fn test_classification_hot() {
-        let config = QuantConfig::default();
-        assert_eq!(classify_precision(0.25, &config), Precision::BF16);
-        assert_eq!(classify_precision(0.10, &config), Precision::BF16);
+    fn test_classification_default() {
+        let t = FrequencyThresholds::default();
+        assert_eq!(classify_precision(0.25, &t), Precision::BF16);
+        assert_eq!(classify_precision(0.10, &t), Precision::BF16);
+        assert_eq!(classify_precision(0.08, &t), Precision::INT8);
+        assert_eq!(classify_precision(0.03, &t), Precision::INT8);
+        assert_eq!(classify_precision(0.02, &t), Precision::INT4);
+        assert_eq!(classify_precision(0.003, &t), Precision::INT4);
     }
 
     #[test]
-    fn test_classification_warm() {
-        let config = QuantConfig::default();
-        assert_eq!(classify_precision(0.08, &config), Precision::INT8);
-        assert_eq!(classify_precision(0.03, &config), Precision::INT8);
-    }
-
-    #[test]
-    fn test_classification_cold() {
-        let config = QuantConfig::default();
-        assert_eq!(classify_precision(0.02, &config), Precision::INT4);
-        assert_eq!(classify_precision(0.005, &config), Precision::INT4);
-    }
-
-    #[test]
-    fn test_classification_frozen() {
-        let config = QuantConfig::default();
-        assert_eq!(classify_precision(0.003, &config), Precision::INT4);
-        assert_eq!(classify_precision(0.001, &config), Precision::INT4);
+    fn test_classification_auto_qwen3() {
+        // 128 experts, top-8: uniform=0.0625, hot=0.125, warm=0.03125
+        let t = FrequencyThresholds::auto(128, 8);
+        assert_eq!(classify_precision(0.13, &t), Precision::BF16);
+        assert_eq!(classify_precision(0.08, &t), Precision::INT8);
+        assert_eq!(classify_precision(0.04, &t), Precision::INT8);
+        assert_eq!(classify_precision(0.01, &t), Precision::INT4);
     }
 
     #[test]
@@ -291,17 +278,14 @@ mod tests {
         let g = make_quant_graph();
         let plan = run_quant_pass(&g);
         let savings = memory_savings_ratio(&plan, &g);
-        // Mixed precision should save something vs all-bf16
-        assert!(savings > 0.0, "should save memory, got ratio {savings}");
+        assert!(savings > 0.0);
     }
 
     #[test]
-    fn test_weighted_error_increases_with_compression() {
+    fn test_weighted_error_bounded() {
         let g = make_quant_graph();
         let plan = run_quant_pass(&g);
-        // Error should be > 0 (some experts are quantized)
         assert!(plan.estimated_weighted_error > 0.0);
-        // But bounded (hot experts in bf16 contribute 0 error)
         assert!(plan.estimated_weighted_error < 0.25);
     }
 }

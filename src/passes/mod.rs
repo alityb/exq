@@ -7,17 +7,17 @@
 //!                 │
 //!    ┌────────────┼────────────┐
 //!    ▼            ▼            ▼
-//!  Pass A       Pass B       Pass D       ← Stage 1: fully parallel
+//!  Pass A       Pass B       Pass D       <- Stage 1: fully parallel
 //!  (Layout)     (Quant)      (Specialize)
 //!    │            │            │
 //!    └────────────┴────────────┘
 //!                 │
 //!                 ▼
-//!              Pass C                      ← Stage 2: parallel across layers
+//!              Pass C                      <- Stage 2: parallel across layers
 //!             (Prefetch)
 //!                 │
 //!                 ▼
-//!          Artifact Builder                ← Stage 3
+//!          Artifact Builder                <- Stage 3
 //! ```
 
 pub mod base;
@@ -26,8 +26,10 @@ pub mod prefetch_emitter;
 pub mod quant_planner;
 pub mod specialization;
 
-pub use base::*;
-pub use layout_planner::*;
-pub use prefetch_emitter::*;
-pub use quant_planner::*;
-pub use specialization::*;
+// Selective re-exports to avoid name conflicts
+pub use base::{run_pipeline, run_pipeline_with_config};
+pub use base::{CompilerOutput, PipelineConfig, PyCompilerPipeline};
+pub use layout_planner::PyLayoutPlan;
+pub use prefetch_emitter::PyPrefetchSchedule;
+pub use quant_planner::PyQuantPlan;
+pub use specialization::PySpecializationPlan;

@@ -25,8 +25,51 @@ pub enum PrefetchPriority {
     Medium,
 }
 
-/// Probability thresholds for prefetch emission.
+/// Configuration for the prefetch pass.
+#[derive(Debug, Clone)]
+pub struct PrefetchConfig {
+    pub high_prob_threshold: f64,
+    pub med_prob_threshold: f64,
+    /// Min activation frequency for a source expert to emit prefetches.
+    pub min_src_freq: f64,
+}
+
+impl Default for PrefetchConfig {
+    fn default() -> Self {
+        Self {
+            high_prob_threshold: 0.70,
+            med_prob_threshold: 0.35,
+            min_src_freq: 0.01,
+        }
+    }
+}
+
+/// Defaults tuned for high-entropy models (Qwen3-style, 128 experts).
+impl PrefetchConfig {
+    pub fn high_entropy() -> Self {
+        Self {
+            high_prob_threshold: 0.30,
+            med_prob_threshold: 0.15,
+            min_src_freq: 0.005,
+        }
+    }
+
+    /// Auto-configure based on model architecture.
+    pub fn auto(n_experts: usize, top_k: usize) -> Self {
+        let uniform = top_k as f64 / n_experts as f64;
+        if uniform < 0.1 {
+            // Many experts, sparse routing (Qwen3-style) → lower thresholds
+            Self::high_entropy()
+        } else {
+            Self::default()
+        }
+    }
+}
+
+/// Legacy constants for tests (use PrefetchConfig in production).
+#[allow(dead_code)]
 const HIGH_PROB_THRESHOLD: f64 = 0.70;
+#[allow(dead_code)]
 const MED_PROB_THRESHOLD: f64 = 0.35;
 
 /// A single prefetch instruction to be embedded in a kernel.
@@ -58,22 +101,35 @@ pub struct PrefetchSchedule {
     pub per_layer_counts: HashMap<usize, usize>,
 }
 
-/// Run the prefetch schedule pass.
-///
-/// This is Stage 2: it reads from the routing graph AND the outputs of A, B, D.
-/// Internally, it parallelizes across layers using rayon.
+/// Run the prefetch schedule pass (default config).
 pub fn run_prefetch_pass(
     graph: &RoutingGraph,
     layout: &LayoutPlan,
     quant: &QuantPlan,
     specialization: &SpecializationPlan,
 ) -> PrefetchSchedule {
+    run_prefetch_pass_with_config(
+        graph,
+        layout,
+        quant,
+        specialization,
+        &PrefetchConfig::default(),
+    )
+}
+
+/// Run with explicit config.
+pub fn run_prefetch_pass_with_config(
+    graph: &RoutingGraph,
+    layout: &LayoutPlan,
+    quant: &QuantPlan,
+    specialization: &SpecializationPlan,
+    config: &PrefetchConfig,
+) -> PrefetchSchedule {
     let layers = graph.layer_indices();
 
-    // Each layer's schedule is independent → parallel across layers
     let layer_schedules: Vec<Vec<PrefetchEntry>> = layers
         .par_iter()
-        .map(|&layer| compute_layer_schedule(graph, layout, quant, specialization, layer))
+        .map(|&layer| compute_layer_schedule(graph, layout, quant, specialization, layer, config))
         .collect();
 
     let mut entries = Vec::new();
@@ -97,16 +153,13 @@ fn compute_layer_schedule(
     quant: &QuantPlan,
     specialization: &SpecializationPlan,
     layer: usize,
+    config: &PrefetchConfig,
 ) -> Vec<PrefetchEntry> {
     let mut entries = Vec::new();
-
-    // Get all nodes in this layer
     let nodes = graph.nodes_in_layer(layer);
 
     for node in &nodes {
-        // Only emit prefetches from hot/warm experts (freq >= some threshold).
-        // Cold experts are rarely hit, so prefetching from them wastes bandwidth.
-        if node.activation_freq < 0.01 {
+        if node.activation_freq < config.min_src_freq {
             continue;
         }
 
@@ -115,18 +168,16 @@ fn compute_layer_schedule(
         for edge in &out_edges {
             let dst_key = edge.dst_key();
 
-            // Skip if the destination layer is specialized (Pass D says skip router)
             if is_specialized(specialization, edge.dst_layer) {
                 continue;
             }
 
-            // Determine priority
-            let priority = if edge.conditional_prob >= HIGH_PROB_THRESHOLD {
+            let priority = if edge.conditional_prob >= config.high_prob_threshold {
                 PrefetchPriority::High
-            } else if edge.conditional_prob >= MED_PROB_THRESHOLD {
+            } else if edge.conditional_prob >= config.med_prob_threshold {
                 PrefetchPriority::Medium
             } else {
-                continue; // probability too low, don't emit
+                continue;
             };
 
             // Determine prefetch size from quant plan
