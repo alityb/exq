@@ -6,7 +6,10 @@ use pyo3::prelude::*;
 use std::collections::HashMap;
 
 use super::layout_planner::{run_layout_pass, LayoutPlan};
-use super::prefetch_emitter::{run_prefetch_pass_with_config, PrefetchConfig, PrefetchSchedule};
+use super::prefetch_emitter::{
+    analyze_bandwidth_feasibility, compute_coverage, run_prefetch_pass_with_config, PrefetchConfig,
+    PrefetchSchedule,
+};
 use super::quant_planner::{run_quant_pass_with_config, QuantConfig, QuantPlan};
 use super::specialization::{run_specialization_pass, SpecializationPlan};
 
@@ -285,6 +288,105 @@ impl PyCompilerPipeline {
                 )
             })
             .collect())
+    }
+
+    /// Compute prefetch coverage against the routing graph.
+    fn get_prefetch_coverage(&self, graph: &crate::ir::PyRoutingGraph) -> PyResult<f64> {
+        let out = self
+            .output
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("pipeline not run yet"))?;
+        Ok(compute_coverage(&out.prefetch, &graph.inner))
+    }
+
+    /// Analyze bandwidth feasibility of the prefetch schedule.
+    /// Returns {layer: bytes} for over-budget layers, plus summary stats.
+    /// budget_per_layer_bytes = pcie_bw_gbps * layer_compute_ms / 1000 * 1e9
+    #[pyo3(signature = (pcie_bw_gbps=32.0, layer_compute_ms=25.0))]
+    fn get_bandwidth_analysis(
+        &self,
+        pcie_bw_gbps: f64,
+        layer_compute_ms: f64,
+    ) -> PyResult<HashMap<String, PyObject>> {
+        use pyo3::types::PyFloat;
+
+        let out = self
+            .output
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("pipeline not run yet"))?;
+
+        let budget = (pcie_bw_gbps * layer_compute_ms / 1000.0 * 1e9) as u64;
+        let analysis = analyze_bandwidth_feasibility(&out.prefetch, budget);
+
+        Python::with_gil(|py| {
+            let mut m = HashMap::new();
+            m.insert(
+                "total_bytes".into(),
+                analysis
+                    .total_bytes
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind(),
+            );
+            m.insert(
+                "max_layer_bytes".into(),
+                analysis
+                    .max_layer_bytes
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind(),
+            );
+            m.insert(
+                "budget_per_layer_bytes".into(),
+                budget.into_pyobject(py).unwrap().into_any().unbind(),
+            );
+            m.insert(
+                "over_budget_layer_count".into(),
+                analysis
+                    .over_budget_layers
+                    .len()
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind(),
+            );
+            m.insert(
+                "total_layers".into(),
+                analysis
+                    .per_layer_bytes
+                    .len()
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind(),
+            );
+            let feasible = analysis.over_budget_layers.is_empty();
+            m.insert(
+                "feasible".into(),
+                feasible
+                    .into_pyobject(py)
+                    .unwrap()
+                    .to_owned()
+                    .into_any()
+                    .unbind(),
+            );
+            m.insert(
+                "utilization".into(),
+                PyFloat::new(
+                    py,
+                    if budget > 0 {
+                        analysis.max_layer_bytes as f64 / budget as f64
+                    } else {
+                        0.0
+                    },
+                )
+                .into_any()
+                .unbind(),
+            );
+            Ok(m)
+        })
     }
 
     fn __repr__(&self) -> String {

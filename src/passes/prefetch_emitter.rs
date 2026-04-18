@@ -231,6 +231,13 @@ pub fn compute_coverage(schedule: &PrefetchSchedule, graph: &RoutingGraph) -> f6
     let mut covered_mass = 0.0f64;
     let mut total_mass = 0.0f64;
 
+    // Build a set for O(1) lookup instead of O(n) linear scan per edge
+    let covered_set: std::collections::HashSet<(usize, usize, usize, usize)> = schedule
+        .entries
+        .iter()
+        .map(|e| (e.src_layer, e.src_expert, e.dst_layer, e.dst_expert))
+        .collect();
+
     for node in graph.nodes.values() {
         let freq = node.activation_freq;
         if freq <= 0.0 {
@@ -240,15 +247,12 @@ pub fn compute_coverage(schedule: &PrefetchSchedule, graph: &RoutingGraph) -> f6
         for edge in &out_edges {
             let weighted = freq * edge.conditional_prob;
             total_mass += weighted;
-
-            // Check if this edge is covered by a prefetch entry
-            let is_covered = schedule.entries.iter().any(|e| {
-                e.src_layer == edge.src_layer
-                    && e.src_expert == edge.src_expert
-                    && e.dst_layer == edge.dst_layer
-                    && e.dst_expert == edge.dst_expert
-            });
-            if is_covered {
+            if covered_set.contains(&(
+                edge.src_layer,
+                edge.src_expert,
+                edge.dst_layer,
+                edge.dst_expert,
+            )) {
                 covered_mass += weighted;
             }
         }
@@ -258,6 +262,49 @@ pub fn compute_coverage(schedule: &PrefetchSchedule, graph: &RoutingGraph) -> f6
         covered_mass / total_mass
     } else {
         0.0
+    }
+}
+
+/// Bandwidth feasibility analysis for the prefetch schedule.
+#[derive(Debug, Clone)]
+pub struct BandwidthAnalysis {
+    /// Per-layer prefetch volume in bytes.
+    pub per_layer_bytes: HashMap<usize, u64>,
+    /// Layers that exceed the bandwidth budget.
+    pub over_budget_layers: Vec<(usize, u64, u64)>, // (layer, actual_bytes, budget_bytes)
+    /// Total prefetch volume across all layers.
+    pub total_bytes: u64,
+    /// Maximum per-layer volume.
+    pub max_layer_bytes: u64,
+}
+
+/// Analyze whether the prefetch schedule fits within hardware bandwidth constraints.
+///
+/// budget_per_layer_bytes = pcie_bandwidth_gbps * layer_compute_time_ms / 1000 * 1e9
+pub fn analyze_bandwidth_feasibility(
+    schedule: &PrefetchSchedule,
+    budget_per_layer_bytes: u64,
+) -> BandwidthAnalysis {
+    let mut per_layer_bytes: HashMap<usize, u64> = HashMap::new();
+
+    for entry in &schedule.entries {
+        *per_layer_bytes.entry(entry.src_layer).or_insert(0) += entry.prefetch_size_bytes;
+    }
+
+    let total_bytes: u64 = per_layer_bytes.values().sum();
+    let max_layer_bytes = per_layer_bytes.values().copied().max().unwrap_or(0);
+
+    let over_budget_layers: Vec<(usize, u64, u64)> = per_layer_bytes
+        .iter()
+        .filter(|(_, &bytes)| bytes > budget_per_layer_bytes)
+        .map(|(&layer, &bytes)| (layer, bytes, budget_per_layer_bytes))
+        .collect();
+
+    BandwidthAnalysis {
+        per_layer_bytes,
+        over_budget_layers,
+        total_bytes,
+        max_layer_bytes,
     }
 }
 
