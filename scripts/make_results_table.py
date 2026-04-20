@@ -332,6 +332,36 @@ def print_latency_table() -> None:
         print(f"  Prefetches executed:   {pf['prefetches_executed']} (async CUDA streams)")
 
 
+def print_external_baseline_table() -> None:
+    print("\n" + "=" * 70)
+    print("Table 5: External Quantizer Comparison")
+    print("=" * 70)
+
+    path = Path("results/awq_comparison.json")
+    if not path.exists():
+        print("(run scripts/eval_external_quant.py to populate this table)")
+        return
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    model_id = data["model_id"]
+    provider = data["provider"].upper()
+    ckpt = data["external_checkpoint"]
+
+    print(f"Model: {model_id}")
+    print(f"External checkpoint: {ckpt}")
+    print()
+    print(f"{'Dataset':<12} {'fp16':>8} {'R-PGO':>8} {provider:>8} {'RTN INT4':>10} {'R-PGO vs ' + provider:>16}")
+    print("-" * 70)
+    for dataset in ("wikitext2", "c4"):
+        row = data[dataset]
+        print(
+            f"{dataset:<12} {row['fp16']:>8.4f} {row['rpgo_dense']:>8.4f} "
+            f"{row['awq_4bit']:>8.4f} {row['int4_rtn']:>10.4f} {row['rpgo_beats_awq_by']:>+16.4f}"
+        )
+    print()
+    print("Note: external baseline uses a published AWQ checkpoint, not an in-process re-quantization.")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -367,6 +397,7 @@ def main():
     print_diagnostic_table(moe_records, dense_records)
     print_quality_table(moe_records, dense_records)
     print_latency_table()
+    print_external_baseline_table()
     print()
 
 
