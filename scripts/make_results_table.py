@@ -330,6 +330,8 @@ def print_latency_table() -> None:
         print(f"  R-PGO static prefetch: +{pf['prefetch_tpot_ms'] - pf['all_gpu_tpot_ms']:.1f}ms/token (overlapped)")
         print(f"  Transfer overlap:      {pf['prefetch_overlap_ratio']:.0%} hidden by compute")
         print(f"  Prefetches executed:   {pf['prefetches_executed']} (async CUDA streams)")
+        print("  Note: this is a controlled expert-offload simulation, not a full end-to-end")
+        print("        serving benchmark with real runtime-integrated expert paging.")
 
 
 def print_external_baseline_table() -> None:
@@ -360,6 +362,7 @@ def print_external_baseline_table() -> None:
         )
     print()
     print("Note: external baseline uses a published AWQ checkpoint, not an in-process re-quantization.")
+    print("      Treat this as a checkpoint-to-checkpoint comparison, not a perfectly controlled baseline.")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────
