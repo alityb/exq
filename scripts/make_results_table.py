@@ -290,7 +290,7 @@ def print_quality_table(moe_records: dict, dense_records: dict) -> None:
 
 def print_latency_table() -> None:
     print("\n" + "=" * 70)
-    print("Table 4: Zero-Overhead Latency")
+    print("Table 4: Zero-Overhead Latency & Prefetch Execution")
     print("=" * 70)
 
     lat_path = Path("results/latency_benchmark.json")
@@ -303,20 +303,33 @@ def print_latency_table() -> None:
     n_tokens = latency.get("n_tokens", "?")
     print(f"Model: {model_id}, {n_tokens} tokens generated")
     print()
-    print(f"{'Condition':<30} {'TPOT':>12} {'Overhead':>14}")
-    print("-" * 58)
+    print(f"{'Condition':<30} {'TPOT':>10} {'Overhead':>12} {'% of baseline':>14}")
+    print("-" * 68)
     baseline = latency["baseline"]["median_ms"]
     predictor = latency["runtime_predictor"]["median_ms"]
     overhead = predictor - baseline
-    print(f"{'A: Baseline':<30} {baseline:>11.1f}ms {'—':>14}")
+    pct = overhead / baseline * 100
+    print(f"{'A: Baseline':<30} {baseline:>9.1f}ms {'—':>12} {'—':>14}")
     print(
-        f"{'B: Runtime predictor':<30} {predictor:>11.1f}ms "
-        f"{overhead:>+13.1f}ms"
+        f"{'B: Runtime predictor (MLP)':<30} {predictor:>9.1f}ms "
+        f"{overhead:>+11.1f}ms {pct:>+13.1f}%"
     )
-    print(f"{'C: R-PGO static':<30} {baseline:>11.1f}ms {'0.0ms (zero)':>14}")
+    print(f"{'C: R-PGO static':<30} {baseline:>9.1f}ms {'0.0ms':>12} {'0.0%':>14}")
     print()
-    print(f"Runtime predictor adds {overhead:.1f}ms/token overhead.")
-    print("R-PGO static schedule adds 0ms — all decisions made at compile time.")
+    print(f"Runtime predictor: +{overhead:.1f}ms/token ({pct:.1f}% overhead).")
+    print("R-PGO: 0ms — schedule compiled statically, no per-token cost.")
+
+    # Prefetch execution results
+    prefetch_path = Path("results/prefetch_execution.json")
+    if prefetch_path.exists():
+        pf = json.loads(prefetch_path.read_text(encoding="utf-8"))
+        print()
+        print(f"{'─'*68}")
+        print(f"Prefetch Execution (expert offload simulation):")
+        print(f"  On-demand loading:     +{pf['on_demand_tpot_ms'] - pf['all_gpu_tpot_ms']:.1f}ms/token overhead")
+        print(f"  R-PGO static prefetch: +{pf['prefetch_tpot_ms'] - pf['all_gpu_tpot_ms']:.1f}ms/token (overlapped)")
+        print(f"  Transfer overlap:      {pf['prefetch_overlap_ratio']:.0%} hidden by compute")
+        print(f"  Prefetches executed:   {pf['prefetches_executed']} (async CUDA streams)")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────
