@@ -14,19 +14,10 @@ use super::quant_planner::{run_quant_pass_with_config, QuantConfig, QuantPlan};
 use super::specialization::{run_specialization_pass, SpecializationPlan};
 
 /// Full configuration for the compiler pipeline.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PipelineConfig {
     pub quant: QuantConfig,
     pub prefetch: PrefetchConfig,
-}
-
-impl Default for PipelineConfig {
-    fn default() -> Self {
-        Self {
-            quant: QuantConfig::default(),
-            prefetch: PrefetchConfig::default(),
-        }
-    }
 }
 
 impl PipelineConfig {
@@ -159,6 +150,8 @@ pub struct PyCompilerPipeline {
     output: Option<CompilerOutput>,
 }
 
+type PyPrefetchEntry = (usize, usize, usize, usize, String, u64);
+
 #[pymethods]
 impl PyCompilerPipeline {
     #[new]
@@ -172,6 +165,7 @@ impl PyCompilerPipeline {
     }
 
     /// Run with explicit frequency thresholds.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (graph, freq_hot=0.10, freq_warm=0.03, freq_cold=0.005, prefetch_high=0.70, prefetch_med=0.35, prefetch_min_freq=0.01))]
     fn run_with_config(
         &mut self,
@@ -268,7 +262,7 @@ impl PyCompilerPipeline {
         Ok(out.prefetch.entries.len())
     }
 
-    fn get_prefetch_schedule(&self) -> PyResult<Vec<(usize, usize, usize, usize, String, u64)>> {
+    fn get_prefetch_schedule(&self) -> PyResult<Vec<PyPrefetchEntry>> {
         let out = self
             .output
             .as_ref()

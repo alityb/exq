@@ -10,7 +10,18 @@ import argparse
 import json
 import logging
 
+from rpgo._core import RoutingProfile
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+
+def _infer_auto_params(profile: RoutingProfile) -> tuple[int, int]:
+    """Infer `(n_experts, top_k)` from the first MoE layer in a profile."""
+    layer_indices = profile.moe_layer_indices()
+    if not layer_indices:
+        raise ValueError("profile contains no MoE layers")
+    first_layer = profile.get_layer(layer_indices[0])
+    return first_layer.n_experts, first_layer.top_k
 
 
 def main():
@@ -24,10 +35,10 @@ def main():
         choices=["all", "quant_only", "prefetch_only", "layout_only", "no_prefetch"],
         help="Which passes to run",
     )
+    parser.add_argument("--run-auto", action="store_true", help="Auto-tune thresholds from profile metadata")
     args = parser.parse_args()
 
     from rpgo._core import (
-        RoutingProfile,
         CompilerPipeline,
         py_build_routing_graph,
         py_graph_summary,
@@ -51,7 +62,11 @@ def main():
     # Run compiler pipeline
     pipeline = CompilerPipeline()
 
-    if args.passes == "all":
+    if args.run_auto:
+        n_experts, top_k = _infer_auto_params(profile)
+        logging.info(f"Running auto-configured pipeline (n_experts={n_experts}, top_k={top_k})")
+        pipeline.run_auto(graph, n_experts, top_k)
+    elif args.passes == "all":
         pipeline.run(graph)
     elif args.passes == "quant_only":
         pipeline.run_selective(graph, layout=False, quant=True, specialize=False, prefetch=False)

@@ -7,7 +7,6 @@ Usage:
 """
 
 import argparse
-import json
 import logging
 import sys
 
@@ -24,6 +23,7 @@ def main():
     parser.add_argument("--config", type=str, help="YAML config file (overrides other args)")
     parser.add_argument("--dataset", type=str, default="wikitext", help="Dataset name")
     parser.add_argument("--dataset-config", type=str, default="wikitext-103-raw-v1")
+    parser.add_argument("--load-in-4bit", action="store_true", help="Load model in 4-bit for profiling")
     args = parser.parse_args()
 
     if args.config:
@@ -41,6 +41,7 @@ def main():
             batch_size=args.batch_size,
             dataset_name=args.dataset,
             dataset_config=args.dataset_config,
+            load_in_4bit=args.load_in_4bit,
         )
         profile = runner.run(output_path=args.output)
     else:

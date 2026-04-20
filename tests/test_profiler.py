@@ -54,13 +54,18 @@ class MockMoEBlock(nn.Module):
 
     def forward(self, x):
         # Just return gate logits (profiler hooks on the gate)
-        gate_logits = self.gate(x)
+        _ = self.gate(x)
         # Simplified: just pass through
         return x
 
 
 class MockQwen3MoeSparseMoeBlock(MockMoEBlock):
     """Name triggers 'Qwen3Moe' detection pattern."""
+    pass
+
+
+class MockMixtralSparseMoeBlock(MockMoEBlock):
+    """Name triggers 'Mixtral' detection pattern."""
     pass
 
 
@@ -73,6 +78,18 @@ class MockTransformerLayer(nn.Module):
     def forward(self, x):
         x = self.norm(x)
         x = self.mlp(x)
+        return x
+
+
+class MockMixtralLayer(nn.Module):
+    def __init__(self, hidden_size: int, n_experts: int, top_k: int = 2):
+        super().__init__()
+        self.block_sparse_moe = MockMixtralSparseMoeBlock(hidden_size, n_experts, top_k)
+        self.norm = nn.LayerNorm(hidden_size)
+
+    def forward(self, x):
+        x = self.norm(x)
+        x = self.block_sparse_moe(x)
         return x
 
 
@@ -101,6 +118,30 @@ class MockMoEModel(nn.Module):
         return x
 
 
+class MockMixtralModel(nn.Module):
+    """A minimal mock Mixtral-like model using block_sparse_moe."""
+
+    def __init__(self, n_layers: int = 4, hidden_size: int = 32,
+                 n_experts: int = 8, top_k: int = 2):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([
+            MockMixtralLayer(hidden_size, n_experts, top_k)
+            for _ in range(n_layers)
+        ])
+        self.hidden_size = hidden_size
+
+    def forward(self, input_ids=None, **kwargs):
+        if input_ids is not None:
+            batch, seq_len = input_ids.shape
+            x = torch.randn(batch, seq_len, self.hidden_size)
+        else:
+            x = torch.randn(1, 10, self.hidden_size)
+        for layer in self.model.layers:
+            x = layer(x)
+        return x
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -116,6 +157,11 @@ class TestFindMoELayers:
         layers = _find_moe_layers(model)
         for _, _, _, n_experts in layers:
             assert n_experts == 16
+
+    def test_finds_mixtral_block_sparse_moe_layers(self):
+        model = MockMixtralModel(n_layers=3, n_experts=8)
+        layers = _find_moe_layers(model)
+        assert len(layers) == 3
 
     def test_no_moe_model(self):
         # A model with no MoE layers

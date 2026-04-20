@@ -218,7 +218,7 @@ fn check_batchable(layout: &LayoutPlan, src_key: (usize, usize), dst_key: (usize
     let dst_offset = layout.placements.get(&dst_key).copied();
     match (src_offset, dst_offset) {
         (Some(s), Some(d)) => {
-            let distance = if s > d { s - d } else { d - s };
+            let distance = s.abs_diff(d);
             // Batchable if within same page
             distance < layout.page_size
         }

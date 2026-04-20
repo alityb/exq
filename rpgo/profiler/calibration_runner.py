@@ -7,12 +7,15 @@ for calibration. This is the main entry point for Phase 1 of R-PGO.
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import torch
 
 from rpgo._core import RoutingProfile
+from rpgo.hf_compat import patch_transformers_remote_code_compat
 from rpgo.profiler.routing_profiler import RoutingProfiler
 
 logger = logging.getLogger(__name__)
@@ -42,6 +45,7 @@ class CalibrationRunner:
         dataset_split: str = "train",
         device: str | None = None,
         torch_dtype: Any = None,
+        load_in_4bit: bool = False,
     ):
         self.model_id = model_id
         self.n_samples = n_samples
@@ -52,6 +56,7 @@ class CalibrationRunner:
         self.dataset_split = dataset_split
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.torch_dtype = torch_dtype or torch.float16
+        self.load_in_4bit = load_in_4bit
 
     def run(self, output_path: str | Path | None = None) -> RoutingProfile:
         """Run the full calibration pipeline.
@@ -72,14 +77,35 @@ class CalibrationRunner:
                 "Install with: pip install rpgo[profile]"
             )
 
+        patch_transformers_remote_code_compat()
         logger.info(f"Loading model: {self.model_id}")
-        tokenizer = AutoTokenizer.from_pretrained(self.model_id)
-        model = AutoModelForCausalLM.from_pretrained(
-            self.model_id,
-            torch_dtype=self.torch_dtype,
-            device_map="auto",
-            trust_remote_code=True,
+        tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
+        if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        offload_folder = os.environ.get("RPGO_OFFLOAD_DIR") or str(
+            Path(tempfile.gettempdir()) / "rpgo_offload"
         )
+        Path(offload_folder).mkdir(parents=True, exist_ok=True)
+
+        load_kwargs: dict[str, Any] = {
+            "device_map": "auto",
+            "trust_remote_code": True,
+            "offload_folder": offload_folder,
+        }
+        if self.load_in_4bit:
+            from transformers import BitsAndBytesConfig
+
+            if torch.cuda.is_available():
+                load_kwargs["device_map"] = {"": 0}
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=self.torch_dtype,
+            )
+        else:
+            load_kwargs["dtype"] = self.torch_dtype
+
+        model = AutoModelForCausalLM.from_pretrained(self.model_id, **load_kwargs)
         model.eval()
 
         logger.info(f"Loading dataset: {self.dataset_name}/{self.dataset_config}")
@@ -125,7 +151,7 @@ class CalibrationRunner:
                     return_tensors="pt",
                 ).to(self.device)
 
-                model(**inputs)
+                model(**inputs, use_cache=False)
 
                 if samples_processed % 100 == 0:
                     logger.info(f"  Processed {samples_processed}/{self.n_samples} samples")
@@ -157,6 +183,7 @@ def run_calibration_from_config(config: dict[str, Any]) -> RoutingProfile:
         dataset_name=config.get("dataset_name", "wikitext"),
         dataset_config=config.get("dataset_config", "wikitext-103-raw-v1"),
         dataset_split=config.get("dataset_split", "train"),
+        load_in_4bit=config.get("load_in_4bit", False),
     )
     output_path = config.get("output_path", "routing_profile.json")
     return runner.run(output_path=output_path)

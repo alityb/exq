@@ -14,7 +14,6 @@ This is the runtime component that enables perplexity comparison between:
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import torch
 import torch.nn as nn

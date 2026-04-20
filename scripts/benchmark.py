@@ -15,7 +15,7 @@ def main():
     parser.add_argument("--artifact", type=str, help="Path to compiled artifact")
     parser.add_argument("--baseline", type=str, help="Baseline model ID for comparison")
     parser.add_argument("--n-tokens", type=int, default=128, help="Tokens to generate")
-    args = parser.parse_args()
+    parser.parse_args()
 
     logging.info("Benchmark stub -- not yet implemented (Milestone 6)")
     logging.info("Will measure: TPOT, TTFT, tokens/sec, memory usage")

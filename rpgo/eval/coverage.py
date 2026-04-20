@@ -34,7 +34,8 @@ class CoverageAnalyzer:
 
         # Pre-build frequency lookup: O(N) once instead of O(N) per edge
         self._freq_map: dict[tuple[int, int], float] = {
-            (l, e): f for l, e, f in self.graph.hot_experts(0.0)
+            (layer_idx, expert_idx): freq
+            for layer_idx, expert_idx, freq in self.graph.hot_experts(0.0)
         }
 
     def compute_coverage(self) -> float:

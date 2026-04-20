@@ -14,7 +14,6 @@ Supports multiple MoE architectures:
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from typing import Any
 
 import torch
@@ -63,9 +62,19 @@ def _find_moe_layers(model: nn.Module) -> list[tuple[int, nn.Module, nn.Module, 
         logger.warning("Could not find transformer layers in model")
         return []
 
+    moe_attr_candidates = (
+        "mlp",
+        "block_sparse_moe",
+        "ffn",
+    )
+
     for layer_idx, layer in enumerate(layers_container):
         # Find MLP/MoE block
-        mlp = getattr(layer, "mlp", None) or getattr(layer, "ffn", None)
+        mlp = None
+        for attr_name in moe_attr_candidates:
+            mlp = getattr(layer, attr_name, None)
+            if mlp is not None:
+                break
         if mlp is None:
             continue
 
@@ -176,7 +185,8 @@ class RoutingProfiler:
         # Order MoE layers for co-activation tracking
         self._moe_layer_order = sorted(self._layer_profiles.keys())
         self._layer_to_order_idx = {
-            l: i for i, l in enumerate(self._moe_layer_order)
+            layer_idx: order_idx
+            for order_idx, layer_idx in enumerate(self._moe_layer_order)
         }
 
         logger.info(
@@ -255,8 +265,6 @@ class RoutingProfiler:
                     topk_indices = logits.topk(min(top_k, logits.size(-1)), dim=-1).indices
 
                 n_tokens = topk_indices.size(0)
-                actual_k = topk_indices.size(1)
-
                 # Update per-expert activation counts
                 # Vectorized: flatten all expert indices and count via bincount
                 flat_experts = topk_indices.reshape(-1).cpu()

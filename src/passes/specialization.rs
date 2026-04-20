@@ -17,9 +17,10 @@ const LOW_ENTROPY_NATS: f64 = 0.347;
 const MED_ENTROPY_NATS: f64 = 1.039;
 
 /// How a layer should be specialized.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum LayerSpecialization {
     /// High entropy: no specialization, use general kernel only.
+    #[default]
     General,
     /// Medium entropy: emit 2-3 specialized kernels + general fallback.
     MultiPath {
@@ -39,12 +40,6 @@ pub enum LayerSpecialization {
 #[derive(Debug, Clone, Default)]
 pub struct SpecializationPlan {
     pub layer_decisions: HashMap<usize, LayerSpecialization>,
-}
-
-impl Default for LayerSpecialization {
-    fn default() -> Self {
-        Self::General
-    }
 }
 
 /// Run the specialization pass.

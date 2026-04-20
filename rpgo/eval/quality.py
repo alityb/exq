@@ -12,12 +12,56 @@ from __future__ import annotations
 
 import logging
 import math
+from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
+
+
+BENCHMARK_SPECS: dict[str, dict[str, Any]] = {
+    "wikitext2": {
+        "dataset_name": "wikitext",
+        "dataset_config": "wikitext-2-raw-v1",
+        "split": "test",
+        "text_field": "text",
+        "streaming": False,
+    },
+    "c4": {
+        "dataset_name": "allenai/c4",
+        "dataset_config": "en",
+        "split": "validation",
+        "text_field": "text",
+        "streaming": True,
+    },
+}
+
+
+def resolve_benchmark(benchmark: str) -> dict[str, Any]:
+    """Return dataset configuration for a named benchmark."""
+    try:
+        return BENCHMARK_SPECS[benchmark].copy()
+    except KeyError as exc:
+        supported = ", ".join(sorted(BENCHMARK_SPECS))
+        raise ValueError(
+            f"unsupported benchmark '{benchmark}'; expected one of: {supported}"
+        ) from exc
+
+
+def append_eval_result(
+    log_path: str | Path,
+    model_id: str,
+    precision: str,
+    benchmark: str,
+    value: float,
+) -> None:
+    """Append a single benchmark result line to the eval log."""
+    path = Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{model_id}\t{precision}\t{benchmark}\t{value}\n")
 
 
 def compute_perplexity(
@@ -30,6 +74,9 @@ def compute_perplexity(
     stride: int = 256,
     max_samples: int | None = None,
     device: str | None = None,
+    text_field: str = "text",
+    model_kwargs: dict[str, Any] | None = None,
+    streaming: bool = False,
 ) -> dict[str, float]:
     """Compute perplexity of a model on a dataset using sliding window.
 
@@ -45,12 +92,17 @@ def compute_perplexity(
     if device is None:
         device = next(model.parameters()).device
 
-    ds = load_dataset(dataset_name, dataset_config, split=split)
+    ds = load_dataset(dataset_name, dataset_config, split=split, streaming=streaming)
 
     # Concatenate all text with newlines
-    texts = [t for t in (item["text"] for item in ds) if t.strip()]
-    if max_samples is not None:
-        texts = texts[:max_samples]
+    texts: list[str] = []
+    for item in ds:
+        text = item[text_field]
+        if not text.strip():
+            continue
+        texts.append(text)
+        if max_samples is not None and len(texts) >= max_samples:
+            break
     full_text = "\n\n".join(texts)
 
     # Tokenize the full text
@@ -64,6 +116,7 @@ def compute_perplexity(
     nlls = []
     n_tokens = 0
     model.eval()
+    model_kwargs = model_kwargs or {"use_cache": False}
 
     for begin in range(0, seq_len - 1, stride):
         end = min(begin + max_length, seq_len)
@@ -75,7 +128,7 @@ def compute_perplexity(
         target_chunk[0, :target_begin - begin] = -100
 
         with torch.no_grad():
-            outputs = model(input_chunk)
+            outputs = model(input_chunk, **model_kwargs)
             logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
 
             # Shift logits and targets for next-token prediction

@@ -1,0 +1,6 @@
+deepseek-ai/DeepSeek-V2-Lite	fp16	wikitext2	6.223172713218389
+deepseek-ai/DeepSeek-V2-Lite	rpgo	wikitext2	6.280682934965284
+deepseek-ai/DeepSeek-V2-Lite	int4	wikitext2	6.280231077334612
+deepseek-ai/DeepSeek-V2-Lite	fp16	c4	9.728540930765199
+deepseek-ai/DeepSeek-V2-Lite	rpgo	c4	9.80111938109044
+deepseek-ai/DeepSeek-V2-Lite	int4	c4	9.801186457386432

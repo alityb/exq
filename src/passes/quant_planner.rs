@@ -48,17 +48,9 @@ pub struct QuantPlan {
 }
 
 /// Configuration for the quantization pass.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct QuantConfig {
     pub thresholds: FrequencyThresholds,
-}
-
-impl Default for QuantConfig {
-    fn default() -> Self {
-        Self {
-            thresholds: FrequencyThresholds::default(),
-        }
-    }
 }
 
 impl QuantConfig {

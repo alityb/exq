@@ -1,0 +1,9 @@
+# R-PGO config: GLM-4.7-Flash
+model_id: "zai-org/GLM-4.7-Flash"
+calibration_samples: 512
+max_length: 256
+batch_size: 1
+dataset_name: "wikitext"
+dataset_config: "wikitext-103-raw-v1"
+dataset_split: "train"
+output_path: "profiles/glm-4-7-flash.json"
