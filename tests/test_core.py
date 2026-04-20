@@ -1,6 +1,5 @@
 """Tests for the Rust core types exposed via PyO3."""
 
-import json
 import tempfile
 from pathlib import Path
 
@@ -14,10 +13,6 @@ from rpgo._core import (
     RoutingGraphNode,
     RoutingGraphEdge,
     CompilerPipeline,
-    QuantPlan,
-    LayoutPlan,
-    PrefetchSchedule,
-    SpecializationPlan,
 )
 
 
@@ -192,15 +187,17 @@ class TestRoutingGraph:
         g = self._make_graph()
         hot = g.hot_experts(0.10)
         assert len(hot) > 0
-        for l, e, f in hot:
-            assert f >= 0.10
+        for layer_idx, expert_idx, freq in hot:
+            del layer_idx, expert_idx
+            assert freq >= 0.10
 
     def test_cold_experts(self):
         g = self._make_graph()
         cold = g.cold_experts(0.20)
         assert len(cold) > 0
-        for l, e, f in cold:
-            assert f < 0.20
+        for layer_idx, expert_idx, freq in cold:
+            del layer_idx, expert_idx
+            assert freq < 0.20
 
     def test_high_prob_edges(self):
         g = self._make_graph()

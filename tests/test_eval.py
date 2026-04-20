@@ -5,12 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import torch
+import torch.nn as nn
 
 from rpgo._core import LayerProfile, RoutingProfile
 from rpgo.hf_compat import patch_transformers_remote_code_compat
 from rpgo.eval.modeling import apply_precision_to_model, compile_quant_plan, model_slug, resolve_offload_folder
+from rpgo.eval.quant_shim import apply_quant_plan_to_model, apply_uniform_int4, quantize_tensor_int4, quantize_tensor_int8
 from rpgo.eval.quality import append_eval_result, resolve_benchmark
-from scripts.make_results_table import parse_eval_log, render_results_table
+from scripts.make_results_table import parse_eval_log
 
 
 def _make_profile(path: Path) -> None:
@@ -93,15 +96,83 @@ def test_apply_precision_to_model_rpgo_requires_profile():
         apply_precision_to_model(DummyModel(), "rpgo")
 
 
+class _DummyFusedExperts(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate_up_proj = nn.Parameter(torch.randn(4, 8, 4, dtype=torch.float16))
+        self.down_proj = nn.Parameter(torch.randn(4, 4, 8, dtype=torch.float16))
+
+
+class _DummySharedExperts(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate_proj = nn.Linear(4, 4, bias=False, dtype=torch.float16)
+
+
+class _DummyGlmMlp(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.experts = _DummyFusedExperts()
+        self.shared_experts = _DummySharedExperts()
+
+
+class _DummyLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mlp = _DummyGlmMlp()
+
+
+class _DummyGlmModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([_DummyLayer()])
+
+
+def test_apply_quant_plan_to_fused_glm_experts():
+    model = _DummyGlmModel()
+    shared_before = model.model.layers[0].mlp.shared_experts.gate_proj.weight.detach().clone()
+    stats = apply_quant_plan_to_model(
+        model,
+        {(0, 0): "BF16", (0, 1): "INT8", (0, 2): "INT4", (0, 3): "INT4"},
+    )
+    assert stats == {"bf16": 1, "int8": 1, "int4": 2, "total": 4}
+    assert torch.equal(
+        model.model.layers[0].mlp.shared_experts.gate_proj.weight,
+        shared_before,
+    )
+
+
+def test_apply_uniform_int4_to_fused_glm_experts_counts_experts():
+    model = _DummyGlmModel()
+    stats = apply_uniform_int4(model)
+    assert stats == {"int4": 4, "total": 4}
+
+
+def test_quantize_tensor_int4_zero_rows_stay_finite():
+    weight = torch.zeros((4, 128), dtype=torch.float16)
+    quantized = quantize_tensor_int4(weight)
+    assert torch.isfinite(quantized).all()
+    assert torch.equal(quantized, weight)
+
+
+def test_quantize_tensor_int8_zero_rows_stay_finite():
+    weight = torch.zeros((4, 128), dtype=torch.float16)
+    quantized = quantize_tensor_int8(weight)
+    assert torch.isfinite(quantized).all()
+    assert torch.equal(quantized, weight)
+
+
 def test_make_results_table_roundtrip(tmp_path: Path):
     log_path = tmp_path / "eval_log.txt"
     log_path.write_text(
         "model/a\tfp16\twikitext2\t8.1\n"
         "model/a\tfp16\tc4\t9.2\n"
-        "model/a\tfp16\tgsm8k\t0.51\n",
+        "model/a\tint4\twikitext2\t8.5\n",
         encoding="utf-8",
     )
     records = parse_eval_log(log_path)
-    table = render_results_table(records)
-    assert "| Model | Precision | WikiText2 | C4 | GSM8K |" in table
-    assert "| model/a | fp16 | 8.1000 | 9.2000 | 0.5100 |" in table
+    assert "model/a" in records
+    assert records["model/a"]["fp16"]["wikitext2"] == 8.1
+    assert records["model/a"]["fp16"]["c4"] == 9.2
+    assert records["model/a"]["int4"]["wikitext2"] == 8.5

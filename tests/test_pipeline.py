@@ -4,11 +4,8 @@ Uses a mock profile (no real model needed) to test the full flow.
 Tests both the manual Python graph builder and the Rust-side graph builder.
 """
 
-import json
 import tempfile
 from pathlib import Path
-
-import pytest
 
 from rpgo._core import (
     RoutingProfile,

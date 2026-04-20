@@ -9,6 +9,7 @@ Usage:
 import argparse
 import json
 import logging
+from pathlib import Path
 
 from rpgo._core import RoutingProfile
 
@@ -36,6 +37,8 @@ def main():
         help="Which passes to run",
     )
     parser.add_argument("--run-auto", action="store_true", help="Auto-tune thresholds from profile metadata")
+    parser.add_argument("--emit-kernels", action="store_true", help="Emit Triton kernel code")
+    parser.add_argument("--kernel-dir", type=str, default=None, help="Output dir for kernels")
     args = parser.parse_args()
 
     from rpgo._core import (
@@ -96,6 +99,17 @@ def main():
     with open(args.output, "w") as f:
         json.dump(artifact, f, indent=2)
     logging.info(f"Artifact saved to {args.output}")
+
+    # Optionally emit Triton kernels
+    if args.emit_kernels:
+        from rpgo.codegen import emit_prefetch_kernels
+
+        kernel_dir = args.kernel_dir or str(Path(args.output).with_suffix("")) + "_kernels/"
+        kernel_path = emit_prefetch_kernels(
+            args.output, kernel_dir,
+            profile_meta={"compile_time_sec": None},
+        )
+        logging.info(f"Triton kernels emitted to {kernel_path}")
 
 
 if __name__ == "__main__":

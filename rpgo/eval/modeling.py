@@ -16,6 +16,7 @@ import torch
 
 from rpgo._core import CompilerPipeline, RoutingProfile, py_build_routing_graph
 from rpgo.hf_compat import patch_transformers_remote_code_compat
+from rpgo.eval.dense_quant_apply import apply_dense_quant, build_uniform_dense_plan
 from rpgo.eval.quant_shim import apply_quant_plan_to_model, apply_uniform_int4
 
 
@@ -94,9 +95,17 @@ def apply_precision_to_model(
     profile_path: str | Path | None = None,
 ) -> dict[str, int]:
     """Apply an evaluation precision mode to an already-loaded model."""
+    has_moe_experts = any(
+        hasattr(getattr(layer, "mlp", None), "experts")
+        for layer in getattr(getattr(model, "model", None), "layers", [])
+    )
     if precision == "fp16":
         return {"fp16": 1, "total": 1}
     if precision == "int4":
+        if not has_moe_experts:
+            plan = build_uniform_dense_plan(model, precision="INT4")
+            apply_dense_quant(model, plan)
+            return plan.summary
         return apply_uniform_int4(model)
     if precision == "rpgo":
         if profile_path is None:

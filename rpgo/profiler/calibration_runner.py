@@ -96,8 +96,7 @@ class CalibrationRunner:
         if self.load_in_4bit:
             from transformers import BitsAndBytesConfig
 
-            if torch.cuda.is_available():
-                load_kwargs["device_map"] = {"": 0}
+            # Use device_map="auto" to spill large models to CPU when needed
             load_kwargs["quantization_config"] = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=self.torch_dtype,
