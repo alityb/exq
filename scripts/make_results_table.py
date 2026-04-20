@@ -303,18 +303,34 @@ def print_latency_table() -> None:
     n_tokens = latency.get("n_tokens", "?")
     print(f"Model: {model_id}, {n_tokens} tokens generated")
     print()
-    print(f"{'Condition':<30} {'TPOT':>10} {'Overhead':>12} {'% of baseline':>14}")
-    print("-" * 68)
-    baseline = latency["baseline"]["median_ms"]
-    predictor = latency["runtime_predictor"]["median_ms"]
-    overhead = predictor - baseline
-    pct = overhead / baseline * 100
-    print(f"{'A: Baseline':<30} {baseline:>9.1f}ms {'—':>12} {'—':>14}")
-    print(
-        f"{'B: Runtime predictor (MLP)':<30} {predictor:>9.1f}ms "
-        f"{overhead:>+11.1f}ms {pct:>+13.1f}%"
-    )
-    print(f"{'C: R-PGO static':<30} {baseline:>9.1f}ms {'0.0ms':>12} {'0.0%':>14}")
+    batch_results = latency.get("batch_results")
+    if batch_results:
+        batch_key = sorted(batch_results.keys(), key=int)[0]
+        batch_payload = batch_results[batch_key]
+        baseline = batch_payload["baseline"]["median_ms"]
+        predictor = batch_payload["runtime_predictor"]["median_ms"]
+        overhead = batch_payload["predictor_overhead_ms"]
+        pct = overhead / baseline * 100
+        print(f"Batch size shown: {batch_key}")
+        print()
+        print(f"{'Condition':<30} {'P50':>10} {'P95':>10} {'P99':>10} {'% of baseline':>14}")
+        print("-" * 78)
+        print(f"{'A: Baseline':<30} {batch_payload['baseline']['p50_ms']:>9.1f} {batch_payload['baseline']['p95_ms']:>9.1f} {batch_payload['baseline']['p99_ms']:>9.1f} {'—':>14}")
+        print(f"{'B: Runtime predictor (MLP)':<30} {batch_payload['runtime_predictor']['p50_ms']:>9.1f} {batch_payload['runtime_predictor']['p95_ms']:>9.1f} {batch_payload['runtime_predictor']['p99_ms']:>9.1f} {pct:>+13.1f}%")
+        print(f"{'C: R-PGO static':<30} {batch_payload['rpgo_static']['p50_ms']:>9.1f} {batch_payload['rpgo_static']['p95_ms']:>9.1f} {batch_payload['rpgo_static']['p99_ms']:>9.1f} {'0.0%':>14}")
+    else:
+        print(f"{'Condition':<30} {'TPOT':>10} {'Overhead':>12} {'% of baseline':>14}")
+        print("-" * 68)
+        baseline = latency["baseline"]["median_ms"]
+        predictor = latency["runtime_predictor"]["median_ms"]
+        overhead = predictor - baseline
+        pct = overhead / baseline * 100
+        print(f"{'A: Baseline':<30} {baseline:>9.1f}ms {'—':>12} {'—':>14}")
+        print(
+            f"{'B: Runtime predictor (MLP)':<30} {predictor:>9.1f}ms "
+            f"{overhead:>+11.1f}ms {pct:>+13.1f}%"
+        )
+        print(f"{'C: R-PGO static':<30} {baseline:>9.1f}ms {'0.0ms':>12} {'0.0%':>14}")
     print()
     print(f"Runtime predictor: +{overhead:.1f}ms/token ({pct:.1f}% overhead).")
     print("R-PGO: 0ms — schedule compiled statically, no per-token cost.")
@@ -338,6 +354,31 @@ def print_external_baseline_table() -> None:
     print("\n" + "=" * 70)
     print("Table 5: External Quantizer Comparison")
     print("=" * 70)
+
+    controlled_wt = Path("results/awq_controlled_qwen2.5-3b_wikitext2.json")
+    controlled_c4 = Path("results/awq_controlled_qwen2.5-3b_c4.json")
+    if controlled_wt.exists() and controlled_c4.exists():
+        wt = json.loads(controlled_wt.read_text(encoding="utf-8"))
+        c4 = json.loads(controlled_c4.read_text(encoding="utf-8"))
+        print("Model: Qwen/Qwen2.5-3B")
+        print("Baseline: controlled in-process AWQ from the same base checkpoint")
+        print()
+        print(f"{'Dataset':<12} {'fp16':>8} {'R-PGO':>8} {'AWQ':>8} {'RTN INT4':>10} {'R-PGO vs AWQ':>16}")
+        print("-" * 70)
+        wt_fp16 = 7.8541
+        wt_rpgo = 7.9170
+        wt_int4 = 8.0535
+        wt_awq = wt["perplexity"]
+        c4_fp16 = 13.8065
+        c4_rpgo = 13.9214
+        c4_int4 = 14.1353
+        c4_awq = c4["perplexity"]
+        print(f"{'wikitext2':<12} {wt_fp16:>8.4f} {wt_rpgo:>8.4f} {wt_awq:>8.4f} {wt_int4:>10.4f} {wt_awq - wt_rpgo:>+16.4f}")
+        print(f"{'c4':<12} {c4_fp16:>8.4f} {c4_rpgo:>8.4f} {c4_awq:>8.4f} {c4_int4:>10.4f} {c4_awq - c4_rpgo:>+16.4f}")
+        print()
+        print("Note: AWQ numbers above are from an in-process quantization run on the")
+        print("      same base checkpoint, using 64 calibration samples and group size 128.")
+        return
 
     path = Path("results/awq_comparison.json")
     if not path.exists():

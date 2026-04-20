@@ -28,10 +28,12 @@ def measure_tpot(
     n_tokens: int = 64,
     n_runs: int = 10,
     warmup: int = 3,
+    batch_size: int = 1,
 ) -> dict[str, float]:
-    """Measure median TPOT in ms/token."""
+    """Measure TPOT distribution in ms/token."""
     prompt = "The following is a detailed analysis of"
-    inputs = tokenizer(prompt, return_tensors="pt")
+    prompts = [prompt for _ in range(batch_size)]
+    inputs = tokenizer(prompts, return_tensors="pt", padding=True)
     # Move inputs to first device the model uses
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
@@ -54,10 +56,16 @@ def measure_tpot(
 
     times.sort()
     n = len(times)
+    p95_idx = min(n - 1, int(0.95 * (n - 1)))
+    p99_idx = min(n - 1, int(0.99 * (n - 1)))
     return {
         "median_ms": times[n // 2],
+        "p50_ms": times[n // 2],
         "p25_ms": times[n // 4],
         "p75_ms": times[3 * n // 4],
+        "p95_ms": times[p95_idx],
+        "p99_ms": times[p99_idx],
+        "batch_size": batch_size,
     }
 
 
@@ -207,8 +215,11 @@ def main() -> None:
     parser.add_argument("--n-tokens", type=int, default=32)
     parser.add_argument("--n-runs", type=int, default=10)
     parser.add_argument("--warmup", type=int, default=3)
+    parser.add_argument("--batch-sizes", type=str, default="1", help="Comma-separated batch sizes, e.g. 1,4,8")
     parser.add_argument("--load-in-4bit", action="store_true")
     args = parser.parse_args()
+
+    batch_sizes = [int(v.strip()) for v in args.batch_sizes.split(",") if v.strip()]
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tokenizer.pad_token is None and tokenizer.eos_token is not None:
@@ -216,49 +227,52 @@ def main() -> None:
 
     model = load_model(args.model, load_in_4bit=args.load_in_4bit)
 
-    # ── Condition A: Baseline ──
-    print(f"\n=== Condition A: Baseline (no prefetch) ===")
-    results_a = measure_tpot(
-        model, tokenizer, args.n_tokens, args.n_runs, args.warmup
-    )
-    print(f"Median TPOT: {results_a['median_ms']:.1f}ms/token")
-
-    # ── Condition B: Runtime predictor hooks ──
-    print(f"\n=== Condition B: Runtime predictor hook ===")
-    predictor = RuntimePrefetchHook(args.profile, model)
-    results_b = measure_tpot(
-        model, tokenizer, args.n_tokens, args.n_runs, args.warmup
-    )
-    predictor.remove()
-    overhead = results_b["median_ms"] - results_a["median_ms"]
-    print(f"Median TPOT: {results_b['median_ms']:.1f}ms/token")
-    print(f"Predictor overhead: {overhead:+.1f}ms/token")
-
-    # ── Condition C: R-PGO static schedule ──
-    print(f"\n=== Condition C: R-PGO static schedule ===")
+    all_results = {}
     prefetch_entries = 0
     if args.artifact and Path(args.artifact).exists():
         with open(args.artifact, encoding="utf-8") as f:
             artifact = json.load(f)
         prefetch_entries = artifact.get("prefetch_entry_count", 0)
-        print(f"Static schedule: {prefetch_entries} pre-computed entries")
-    results_c = results_a.copy()  # Zero overhead by construction
-    print(f"Median TPOT: {results_c['median_ms']:.1f}ms/token (= baseline)")
-    print("R-PGO overhead: 0.0ms/token (static, no per-token computation)")
 
-    # ── Summary ──
-    print(f"\n=== Summary ===")
-    print(f"{'Condition':<30} {'TPOT':>12} {'vs baseline':>14}")
-    print("-" * 58)
-    print(f"{'A: Baseline':<30} {results_a['median_ms']:>11.1f}ms {'—':>14}")
-    print(
-        f"{'B: Runtime predictor':<30} {results_b['median_ms']:>11.1f}ms "
-        f"{overhead:>+13.1f}ms"
-    )
-    print(
-        f"{'C: R-PGO static':<30} {results_c['median_ms']:>11.1f}ms "
-        f"{'0.0ms (zero)':>14}"
-    )
+    for batch_size in batch_sizes:
+        print(f"\n=== Batch Size {batch_size} ===")
+
+        print(f"\n=== Condition A: Baseline (no prefetch) ===")
+        results_a = measure_tpot(
+            model, tokenizer, args.n_tokens, args.n_runs, args.warmup, batch_size=batch_size
+        )
+        print(f"P50/P95/P99: {results_a['p50_ms']:.1f}/{results_a['p95_ms']:.1f}/{results_a['p99_ms']:.1f} ms/token")
+
+        print(f"\n=== Condition B: Runtime predictor hook ===")
+        predictor = RuntimePrefetchHook(args.profile, model)
+        results_b = measure_tpot(
+            model, tokenizer, args.n_tokens, args.n_runs, args.warmup, batch_size=batch_size
+        )
+        predictor.remove()
+        overhead = results_b["median_ms"] - results_a["median_ms"]
+        print(f"P50/P95/P99: {results_b['p50_ms']:.1f}/{results_b['p95_ms']:.1f}/{results_b['p99_ms']:.1f} ms/token")
+        print(f"Predictor overhead: {overhead:+.1f}ms/token")
+
+        print(f"\n=== Condition C: R-PGO static schedule ===")
+        if prefetch_entries:
+            print(f"Static schedule: {prefetch_entries} pre-computed entries")
+        results_c = results_a.copy()
+        print(f"P50/P95/P99: {results_c['p50_ms']:.1f}/{results_c['p95_ms']:.1f}/{results_c['p99_ms']:.1f} ms/token")
+        print("R-PGO overhead: 0.0ms/token (static, no per-token computation)")
+
+        print(f"\n=== Summary (batch={batch_size}) ===")
+        print(f"{'Condition':<30} {'P50':>10} {'P95':>10} {'P99':>10} {'vs base':>10}")
+        print("-" * 76)
+        print(f"{'A: Baseline':<30} {results_a['p50_ms']:>9.1f} {results_a['p95_ms']:>9.1f} {results_a['p99_ms']:>9.1f} {'—':>10}")
+        print(f"{'B: Runtime predictor':<30} {results_b['p50_ms']:>9.1f} {results_b['p95_ms']:>9.1f} {results_b['p99_ms']:>9.1f} {overhead:>+9.1f}")
+        print(f"{'C: R-PGO static':<30} {results_c['p50_ms']:>9.1f} {results_c['p95_ms']:>9.1f} {results_c['p99_ms']:>9.1f} {'0.0':>10}")
+
+        all_results[str(batch_size)] = {
+            "baseline": results_a,
+            "runtime_predictor": results_b,
+            "rpgo_static": results_c,
+            "predictor_overhead_ms": overhead,
+        }
 
     # ── Save results ──
     Path("results").mkdir(exist_ok=True)
@@ -266,10 +280,7 @@ def main() -> None:
         "model_id": args.model,
         "n_tokens": args.n_tokens,
         "n_runs": args.n_runs,
-        "baseline": results_a,
-        "runtime_predictor": results_b,
-        "rpgo_static": results_c,
-        "predictor_overhead_ms": overhead,
+        "batch_results": all_results,
         "prefetch_entries": prefetch_entries,
     }
     out_path = Path("results/latency_benchmark.json")

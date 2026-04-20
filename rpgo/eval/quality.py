@@ -167,6 +167,70 @@ def compute_perplexity(
     }
 
 
+def compute_kl_divergence(
+    reference_model,
+    candidate_model,
+    tokenizer,
+    dataset_name: str = "wikitext",
+    dataset_config: str = "wikitext-2-raw-v1",
+    split: str = "test",
+    max_length: int = 256,
+    max_samples: int | None = 200,
+    device: str | None = None,
+    text_field: str = "text",
+    streaming: bool = False,
+) -> dict[str, float]:
+    """Compute KL divergence between reference and candidate logits.
+
+    Returns token-level KL statistics to capture both average and outlier drift.
+    """
+    from datasets import load_dataset
+
+    if device is None:
+        device = next(reference_model.parameters()).device
+
+    ds = load_dataset(dataset_name, dataset_config, split=split, streaming=streaming)
+
+    kl_values: list[float] = []
+    n_samples = 0
+    reference_model.eval()
+    candidate_model.eval()
+
+    for item in ds:
+        text = item[text_field]
+        if not text.strip():
+            continue
+        enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=max_length)
+        input_ids = enc["input_ids"].to(device)
+        if input_ids.shape[1] < 2:
+            continue
+
+        with torch.no_grad():
+            ref_logits = reference_model(input_ids, use_cache=False).logits[:, :-1, :]
+            cand_logits = candidate_model(input_ids, use_cache=False).logits[:, :-1, :]
+
+        p = F.softmax(ref_logits.float(), dim=-1)
+        q_log = F.log_softmax(cand_logits.float(), dim=-1)
+        kl = F.kl_div(q_log, p, reduction="none").sum(dim=-1)
+        kl_values.extend(kl.reshape(-1).cpu().tolist())
+
+        n_samples += 1
+        if max_samples is not None and n_samples >= max_samples:
+            break
+
+    if not kl_values:
+        return {"mean": float("nan"), "max": float("nan"), "p99": float("nan"), "count": 0}
+
+    kl_values.sort()
+    p99_idx = min(len(kl_values) - 1, int(0.99 * len(kl_values)))
+    return {
+        "mean": sum(kl_values) / len(kl_values),
+        "max": max(kl_values),
+        "p99": kl_values[p99_idx],
+        "count": len(kl_values),
+    }
+
+
 def run_perplexity_comparison(
     model_id: str,
     quant_plan: dict[tuple[int, int], str] | None = None,
