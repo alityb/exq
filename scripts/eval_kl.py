@@ -11,41 +11,29 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="R-PGO KL divergence evaluation")
     parser.add_argument("--reference-model", required=True)
     parser.add_argument("--candidate-model", required=True)
-    parser.add_argument("--candidate-precision", required=True, choices=["fp16", "int4", "rpgo", "rpgo_dense"])
+    parser.add_argument("--candidate-precision", required=True, choices=["fp16", "int4", "rpgo", "rpgo_dense", "awq_controlled"])
     parser.add_argument("--profile")
     parser.add_argument("--quant-plan")
+    parser.add_argument("--awq-calib-samples", type=int, default=64)
+    parser.add_argument("--awq-calib-seq-len", type=int, default=512)
+    parser.add_argument("--awq-group-size", type=int, default=128)
     parser.add_argument("--benchmark", choices=["wikitext2", "c4"], required=True)
     parser.add_argument("--max-samples", type=int, default=200)
     parser.add_argument("--max-length", type=int, default=256)
     args = parser.parse_args()
 
-    from rpgo.eval import compute_kl_divergence, load_model_and_tokenizer, apply_precision_to_model, apply_dense_quant, resolve_benchmark
+    from rpgo.eval import compute_kl_divergence, load_model_and_tokenizer, load_model_variant, resolve_benchmark
 
     ref_model, tokenizer = load_model_and_tokenizer(args.reference_model)
-    cand_model, _ = load_model_and_tokenizer(args.candidate_model)
-
-    if args.candidate_precision == "rpgo_dense":
-        if args.quant_plan is None:
-            raise ValueError("--quant-plan is required for rpgo_dense")
-        from rpgo.compiler.dense_quant_planner import DenseQuantPlan, HeadQuantPlan
-        from collections import defaultdict
-
-        with open(args.quant_plan, encoding="utf-8") as handle:
-            artifact = json.load(handle)
-        layer_heads = defaultdict(dict)
-        for key, precision in artifact["quant_assignments"].items():
-            layer_idx, head_idx = map(int, key.split(":"))
-            layer_heads[layer_idx][head_idx] = precision
-        plan = DenseQuantPlan(
-            model_id=artifact.get("model_id", args.candidate_model),
-            layer_plans={
-                idx: HeadQuantPlan(layer_idx=idx, assignments=heads, estimated_memory_ratio=1.0)
-                for idx, heads in layer_heads.items()
-            },
-        )
-        cand_model = apply_dense_quant(cand_model, plan)
-    else:
-        apply_precision_to_model(cand_model, args.candidate_precision, profile_path=args.profile)
+    cand_model, _ = load_model_variant(
+        args.candidate_model,
+        args.candidate_precision,
+        profile=args.profile,
+        quant_plan=args.quant_plan,
+        awq_calib_samples=args.awq_calib_samples,
+        awq_calib_seq_len=args.awq_calib_seq_len,
+        awq_group_size=args.awq_group_size,
+    )
 
     benchmark = resolve_benchmark(args.benchmark)
     result = compute_kl_divergence(

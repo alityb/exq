@@ -23,47 +23,41 @@ DEFAULT_TASKS = [
 def main() -> None:
     parser = argparse.ArgumentParser(description="R-PGO zero-shot accuracy suite")
     parser.add_argument("--model", required=True)
-    parser.add_argument("--precision", required=True, choices=["fp16", "int4", "rpgo", "rpgo_dense"])
+    parser.add_argument("--precision", required=True, choices=["fp16", "int4", "rpgo", "rpgo_dense", "awq_controlled"])
     parser.add_argument("--profile")
     parser.add_argument("--quant-plan")
+    parser.add_argument("--awq-calib-samples", type=int, default=64)
+    parser.add_argument("--awq-calib-seq-len", type=int, default=512)
+    parser.add_argument("--awq-group-size", type=int, default=128)
     parser.add_argument("--limit", type=int, default=None, help="Optional per-task example limit")
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
     from lm_eval import simple_evaluate
-    from rpgo.eval import apply_precision_to_model, load_model_and_tokenizer, apply_dense_quant
+    from lm_eval.models.huggingface import HFLM
+    from rpgo.eval import load_model_variant
 
-    model, tokenizer = load_model_and_tokenizer(args.model)
+    model, tokenizer = load_model_variant(
+        args.model,
+        args.precision,
+        profile=args.profile,
+        quant_plan=args.quant_plan,
+        awq_calib_samples=args.awq_calib_samples,
+        awq_calib_seq_len=args.awq_calib_seq_len,
+        awq_group_size=args.awq_group_size,
+    )
 
-    if args.precision == "rpgo_dense":
-        if args.quant_plan is None:
-            raise ValueError("--quant-plan is required for rpgo_dense")
-        from rpgo.compiler.dense_quant_planner import DenseQuantPlan, HeadQuantPlan
-        from collections import defaultdict
-
-        with open(args.quant_plan, encoding="utf-8") as handle:
-            artifact = json.load(handle)
-        layer_heads = defaultdict(dict)
-        for key, precision in artifact["quant_assignments"].items():
-            layer_idx, head_idx = map(int, key.split(":"))
-            layer_heads[layer_idx][head_idx] = precision
-        plan = DenseQuantPlan(
-            model_id=artifact.get("model_id", args.model),
-            layer_plans={
-                idx: HeadQuantPlan(layer_idx=idx, assignments=heads, estimated_memory_ratio=1.0)
-                for idx, heads in layer_heads.items()
-            },
-        )
-        model = apply_dense_quant(model, plan)
-    else:
-        apply_precision_to_model(model, args.precision, profile_path=args.profile)
+    lm = HFLM(
+        pretrained=model,
+        tokenizer=tokenizer,
+        batch_size=1,
+        trust_remote_code=True,
+        device="cuda",
+    )
 
     results = simple_evaluate(
-        model="hf",
-        model_args={
-            "pretrained": model,
-            "tokenizer": tokenizer,
-        },
+        model=lm,
+        model_args=None,
         tasks=DEFAULT_TASKS,
         num_fewshot=0,
         limit=args.limit,

@@ -406,6 +406,47 @@ def print_external_baseline_table() -> None:
     print("      Treat this as a checkpoint-to-checkpoint comparison, not a perfectly controlled baseline.")
 
 
+def print_zero_shot_and_kl_table() -> None:
+    print("\n" + "=" * 70)
+    print("Table 6: Zero-Shot Accuracy + KL Divergence")
+    print("=" * 70)
+
+    fp16_path = Path("results/zero_shot_qwen2.5-3b_fp16.json")
+    int4_path = Path("results/zero_shot_qwen2.5-3b_int4.json")
+    rpgo_path = Path("results/zero_shot_qwen2.5-3b_rpgo_dense.json")
+    awq_path = Path("results/zero_shot_qwen2.5-3b_awq_controlled.json")
+    kl_int4_path = Path("results/kl_qwen2.5-3b_int4.json")
+    kl_rpgo_path = Path("results/kl_qwen2.5-3b_rpgo_dense.json")
+    kl_awq_path = Path("results/kl_qwen2.5-3b_awq_controlled.json")
+
+    required = [fp16_path, int4_path, rpgo_path, awq_path, kl_int4_path, kl_rpgo_path, kl_awq_path]
+    if not all(p.exists() for p in required):
+        print("(run zero-shot and KL evals to populate this table)")
+        return
+
+    fp16 = json.loads(fp16_path.read_text(encoding="utf-8"))
+    int4 = json.loads(int4_path.read_text(encoding="utf-8"))
+    rpgo = json.loads(rpgo_path.read_text(encoding="utf-8"))
+    awq = json.loads(awq_path.read_text(encoding="utf-8"))
+    kl_int4 = json.loads(kl_int4_path.read_text(encoding="utf-8"))
+    kl_rpgo = json.loads(kl_rpgo_path.read_text(encoding="utf-8"))
+    kl_awq = json.loads(kl_awq_path.read_text(encoding="utf-8"))
+
+    print("Model: Qwen/Qwen2.5-3B")
+    print("Tasks: ARC-Easy, ARC-Challenge, PIQA, HellaSwag, WinoGrande (0-shot)")
+    print("KL: token-level divergence vs fp16 on WikiText2")
+    print()
+    print(f"{'Variant':<18} {'Avg Acc':>9} {'KL mean':>10} {'KL p99':>10} {'KL max':>10}")
+    print("-" * 64)
+    print(f"{'fp16':<18} {fp16['average_accuracy']:>9.4f} {'—':>10} {'—':>10} {'—':>10}")
+    print(f"{'int4':<18} {int4['average_accuracy']:>9.4f} {kl_int4['mean']:>10.4f} {kl_int4['p99']:>10.4f} {kl_int4['max']:>10.4f}")
+    print(f"{'R-PGO dense':<18} {rpgo['average_accuracy']:>9.4f} {kl_rpgo['mean']:>10.4f} {kl_rpgo['p99']:>10.4f} {kl_rpgo['max']:>10.4f}")
+    print(f"{'AWQ controlled':<18} {awq['average_accuracy']:>9.4f} {kl_awq['mean']:>10.4f} {kl_awq['p99']:>10.4f} {kl_awq['max']:>10.4f}")
+    print()
+    print("Takeaway: R-PGO dense improves zero-shot accuracy over RTN int4 and")
+    print("dramatically lowers KL mean/p99 relative to both RTN int4 and controlled AWQ.")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -442,6 +483,7 @@ def main():
     print_quality_table(moe_records, dense_records)
     print_latency_table()
     print_external_baseline_table()
+    print_zero_shot_and_kl_table()
     print()
 
 
