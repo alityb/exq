@@ -23,6 +23,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from rpgo.runtime.coverage_monitor import CoverageSnapshot, OnlineMonitor
+
 
 class ExpertWeightCache:
     """Two-tier expert weight cache: GPU (hot) + CPU (cold).
@@ -185,6 +187,7 @@ class CompiledInference:
         # Stats
         self._tokens_generated = 0
         self._total_prefetch_time_ms = 0.0
+        self.monitor: OnlineMonitor | None = None
 
         # Register any explicitly offloaded expert weights if the model already
         # contains them on CPU. This keeps the runtime honest: prefetching only
@@ -274,6 +277,16 @@ class CompiledInference:
             patched += 1
 
         return patched
+
+    def attach_monitor(self, *, threshold: float = 0.75, window: int = 500) -> OnlineMonitor:
+        """Attach an online coverage monitor to detect stale compiled schedules."""
+        schedule = []
+        for src_layer, expert_map in self.prefetch_table.items():
+            for src_expert, targets in expert_map.items():
+                for dst_layer, dst_expert, priority in targets:
+                    schedule.append((src_layer, src_expert, dst_layer, dst_expert, priority))
+        self.monitor = OnlineMonitor(schedule, threshold=threshold, window=window)
+        return self.monitor
 
     def _find_moe_layers(self) -> list[tuple[int, nn.Module]]:
         """Find all MoE layers in the model."""
