@@ -447,6 +447,31 @@ def print_zero_shot_and_kl_table() -> None:
     print("dramatically lowers KL mean/p99 relative to both RTN int4 and controlled AWQ.")
 
 
+def print_e2e_metrics_table() -> None:
+    print("\n" + "=" * 70)
+    print("Table 7: End-to-End Inference Metrics")
+    print("=" * 70)
+
+    path = Path("results/e2e_metrics_batch1.json")
+    if not path.exists():
+        print("(run scripts/bench_e2e_metrics.py to populate this table)")
+        return
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    print(f"GPU: {data['gpu']}")
+    print(f"Model: {data['model_id']}")
+    print(f"Batch size: {data['batch_size']}, output tokens: {data['n_tokens']}")
+    print()
+    print(f"{'Condition':<24} {'TTFT p50':>10} {'TPOT p50':>10} {'Throughput':>12}")
+    print("-" * 62)
+    print(f"{'Baseline':<24} {data['baseline']['ttft_ms']['p50']:>9.1f}ms {data['baseline']['tpot_ms']['p50']:>9.1f}ms {data['baseline']['throughput_toks_per_s']['p50']:>11.1f}")
+    print(f"{'Runtime predictor':<24} {data['runtime_predictor']['ttft_ms']['p50']:>9.1f}ms {data['runtime_predictor']['tpot_ms']['p50']:>9.1f}ms {data['runtime_predictor']['throughput_toks_per_s']['p50']:>11.1f}")
+    print(f"{'R-PGO compiled':<24} {data['rpgo_compiled']['ttft_ms']['p50']:>9.1f}ms {data['rpgo_compiled']['tpot_ms']['p50']:>9.1f}ms {data['rpgo_compiled']['throughput_toks_per_s']['p50']:>11.1f}")
+    print()
+    print("Takeaway: runtime prediction hurts end-to-end token latency and throughput;")
+    print("R-PGO moves that decision cost offline into compilation.")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -484,6 +509,7 @@ def main():
     print_latency_table()
     print_external_baseline_table()
     print_zero_shot_and_kl_table()
+    print_e2e_metrics_table()
     print()
 
 

@@ -92,6 +92,11 @@ class ExpertWeightCache:
             "hit_rate": self.hits / max(self.hits + self.misses, 1),
         }
 
+    @property
+    def has_offloaded_weights(self) -> bool:
+        """Whether there are any CPU-resident expert weights to prefetch."""
+        return bool(self._cpu_store)
+
 
 class CompiledMoEForward(nn.Module):
     """Drop-in replacement for MoE forward pass using R-PGO compiled schedule.
@@ -136,6 +141,12 @@ class CompiledMoEForward(nn.Module):
         The schedule was computed at compile time from the routing graph.
         We just iterate the pre-built table and issue async transfers.
         """
+        # Fast-path: if nothing is offloaded, there is nothing to prefetch.
+        # This keeps the compiled runtime at effectively zero overhead on
+        # models that fit fully in GPU memory.
+        if not self.weight_cache.has_offloaded_weights:
+            return
+
         # For each expert that MIGHT be active (based on compile-time analysis),
         # prefetch its predicted next-layer targets
         for expert_idx, targets in self.prefetch_table.items():
@@ -175,6 +186,33 @@ class CompiledInference:
         self._tokens_generated = 0
         self._total_prefetch_time_ms = 0.0
 
+        # Register any explicitly offloaded expert weights if the model already
+        # contains them on CPU. This keeps the runtime honest: prefetching only
+        # occurs when there is something to prefetch.
+        self._register_existing_offloaded_weights()
+
+    def _register_existing_offloaded_weights(self) -> None:
+        """Register CPU-resident expert tensors from the loaded model, if any.
+
+        On fully in-GPU models this does nothing, which is the desired behavior.
+        """
+        layers = self._find_moe_layers()
+        for layer_idx, layer_module in layers:
+            mlp = getattr(layer_module, "mlp", None)
+            if mlp is None or not hasattr(mlp, "experts"):
+                continue
+
+            experts = getattr(mlp, "experts", None)
+            if experts is None:
+                continue
+
+            # Iterable expert modules
+            if hasattr(experts, "__iter__") and not hasattr(experts, "gate_up_proj"):
+                for expert_idx, expert in enumerate(experts):
+                    params = list(expert.parameters())
+                    if params and params[0].device.type == "cpu":
+                        self.weight_cache.register_expert(layer_idx, expert_idx, params[0].data)
+
     def _build_prefetch_table(self) -> dict[int, dict[int, list[tuple[int, int, int]]]]:
         """Build layer -> expert -> [(dst_layer, dst_expert, priority)] from artifact."""
         table: dict[int, dict[int, list]] = defaultdict(lambda: defaultdict(list))
@@ -208,6 +246,8 @@ class CompiledInference:
         This is non-destructive — stores originals for restoration.
         """
         self._original_forwards = {}
+        if not self.weight_cache.has_offloaded_weights:
+            return 0
         layers = self._find_moe_layers()
 
         patched = 0
