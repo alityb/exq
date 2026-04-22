@@ -121,33 +121,45 @@ weights (uint8, two values per byte, group_size=128 per-group fp16 scales).
 SGLang uses `fused_experts_impl` with `use_int4_w4a16=True, block_shape=[0,128]`,
 dispatching to its `fused_moe_kernel_gptq_awq` Triton kernel.
 ExQ uses `moe_int4_full_forward`: sorts tokens once, runs gate+up → SiLU → down
-in two Triton kernel launches sharing the same sort, then combines.
+in two Triton kernel launches sharing the same sort order, then combines.
 Outputs agree to <0.4% relative error (same RTN-quantized weights).
 
-| Model | Batch | SGLang INT4 | ExQ INT4 | Δ |
-|---|---|---|---|---|
-| OLMoE-1B-7B | 1 | 1.054 ms | 1.147 ms | −8.8% |
-| OLMoE-1B-7B | 2 | 1.935 ms | 1.292 ms | **+33%** |
-| OLMoE-1B-7B | 4 | 1.944 ms | 1.362 ms | **+30%** |
-| OLMoE-1B-7B | 8 | 1.966 ms | 1.514 ms | **+23%** |
-| Qwen3-30B-A3B | 1 | 1.753 ms | 1.761 ms | −0.4% |
-| Qwen3-30B-A3B | 2 | 1.782 ms | 1.890 ms | −6.1% |
-| Qwen3-30B-A3B | 4 | 2.854 ms | 2.156 ms | **+25%** |
-| Qwen3-30B-A3B | 8 | 2.919 ms | 2.704 ms | **+7%** |
+**Cache effects:** INT4 weights are 198 MB (OLMoE) and 297 MB (Qwen3) vs 6 MB
+of L2 cache on the A10G — weights are 33–50× larger than L2 and always load
+from HBM regardless of cache state. Warm-cache vs cold-cache (L2 flushed before
+every call) differs by at most 0.8 pp across all configurations. Cache state
+does not affect the comparison.
 
-A10G, seqlen=64, 200-run P50.
+**Full production sweep — decode regime (1 token per request):**
 
-**At batch≥2 for OLMoE and batch≥4 for Qwen3, ExQ wins by 7–33%.**
-The speedup comes from sorted-token dispatch: tokens are grouped by expert before
-the GEMM, turning scattered reads into sequential HBM access. ExQ sorts once and
-reuses the sort for both the gate+up and down projections.
+| Batch | OLMoE SGLang | OLMoE ExQ | OLMoE Δ | Qwen3 SGLang | Qwen3 ExQ | Qwen3 Δ |
+|---|---|---|---|---|---|---|
+| 1 | 0.334 ms | 0.588 ms | −76% | 0.421 ms | 0.625 ms | −49% |
+| 8 | 0.421 ms | 0.645 ms | −53% | 0.863 ms | 0.982 ms | −14% |
+| 16 | 0.624 ms | 0.839 ms | −35% | 1.242 ms | 1.289 ms | −4% |
+| 32 | 0.787 ms | 0.977 ms | −24% | 1.528 ms | 1.541 ms | ~0% |
+| 64 | 1.062 ms | 1.183 ms | −11% | 1.715 ms | 1.735 ms | −1% |
+| **128** | 1.893 ms | **1.355 ms** | **+28%** | 1.799 ms | 1.871 ms | −4% |
+| **256** | 1.951 ms | **1.433 ms** | **+27%** | 2.868 ms | **2.150 ms** | **+25%** |
+| **512** | 1.983 ms | **1.571 ms** | **+21%** | 2.934 ms | **2.696 ms** | **+8%** |
 
-**At batch=1, ExQ is within 1–9% of SGLang.** SGLang's kernel fuses the entire
-forward pass (gate+up+SiLU+down+combine) into one Triton kernel launch;
-ExQ uses two launches and ~0.27 ms of Python boundary overhead for sorting.
-At 64 tokens/64 experts = 1 token per expert on average, this overhead is
-proportionally large. At batch≥2 the compute dominates and ExQ's sorted
-dispatch wins.
+A10G, seqlen=1 (pure decode), 300-run P50.
+
+**ExQ wins at batch≥128 for OLMoE and batch≥256 for Qwen3.** At these batch
+sizes, ExQ's sorted-token dispatch pays off: tokens are grouped by expert before
+the GEMM, turning scattered HBM reads into sequential accesses.
+
+**SGLang wins at small batches.** ExQ's Python dispatch (argsort + bincount +
+cumsum, ~0.27 ms) is not amortised over enough compute at low token counts.
+SGLang handles dispatch in C++ with no Python boundary.
+
+**The SGLang cliff at OLMoE batch=128** (1.06→1.89 ms, nearly 2×) is a kernel
+config boundary where SGLang's autotuner selects a different block configuration
+— ExQ's sorted dispatch avoids this cliff entirely.
+
+**Cross-over point** is determined by `avg_tokens_per_expert`:
+- OLMoE (top-2/64): cross-over at ~4 tokens/expert (batch≥128)
+- Qwen3 (top-8/128): cross-over at ~16 tokens/expert (batch≥256)
 
 
 | Model | Batch | SGLang INT4 | ExQ INT4 | Δ |
