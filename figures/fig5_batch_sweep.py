@@ -9,12 +9,10 @@ Data from results/int4_production_batch.json.
 """
 
 import json
-import sys
-sys.path.insert(0, "figures")
 
 import matplotlib.pyplot as plt
 import numpy as np
-from style import apply_style, CORAL, TEAL, DARK, save
+from figures.style import apply_style, CORAL, TEAL, DARK, save
 
 apply_style()
 

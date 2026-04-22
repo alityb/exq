@@ -22,13 +22,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import statistics
 import sys
-import time
 import types
 from pathlib import Path
 
 import torch
+from exq.eval.bench import bench
 
 
 # ── Inject minimal mock ServerArgs so SGLang's MoE kernel config works ────────
@@ -64,28 +63,7 @@ MODEL_CONFIGS = {
 
 
 # ── Timing helpers ────────────────────────────────────────────────────────────
-
-def bench(fn, n_warmup: int = 20, n_runs: int = 100) -> dict:
-    for _ in range(n_warmup):
-        fn()
-    torch.cuda.synchronize()
-    times: list[float] = []
-    for _ in range(n_runs):
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        fn()
-        torch.cuda.synchronize()
-        times.append((time.perf_counter() - t0) * 1000)
-    times.sort()
-    n = len(times)
-    return {
-        "p50":  times[n // 2],
-        "p95":  times[int(0.95 * (n - 1))],
-        "p99":  times[int(0.99 * (n - 1))],
-        "mean": statistics.mean(times),
-        "ci95": 1.96 * statistics.stdev(times) / n**0.5,
-        "n":    n,
-    }
+# bench() is imported from exq.eval.bench
 
 
 # ── SGLang mock objects ───────────────────────────────────────────────────────
@@ -233,15 +211,14 @@ def run_model(cfg: dict, args) -> dict:
 
     # ── Patch SGLang ──────────────────────────────────────────────────────────
     print("\nPatching SGLang with ExQ backend...")
-    from exq.runtime.sglang_backend import patch_sglang, _PACKED_CACHE
+    from exq.runtime.sglang_backend import patch_sglang, _exq_packed_cache as _PACKED_CACHE
     backend = patch_sglang(ARTIFACT)
     print(f"Artifact: {backend.n_layers} layers covered")
 
     # Force weight packing on first call (happens lazily, but we time it)
     t_pack = time.perf_counter()
-    from exq.runtime.sglang_backend import _get_or_pack
-    _ = _get_or_pack(layer)
-    t_pack = (time.perf_counter() - t_pack) * 1000
+    # weight packing is done lazily inside patch_sglang; use backend.cache_stats()
+    _ =     t_pack = (time.perf_counter() - t_pack) * 1000
     print(f"Weight packing (once): {t_pack:.1f}ms  "
           f"(fp16→INT4, cached for all subsequent calls)")
 

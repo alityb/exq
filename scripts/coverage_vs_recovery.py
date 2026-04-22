@@ -17,8 +17,7 @@ from exq._core import (
     py_build_routing_graph,
     py_graph_summary,
 )
-from exq.eval.bench import compute_recovery_pct as compute_recovery
-from exq.eval.bench import parse_eval_log
+from exq.eval.bench import compute_recovery_pct as compute_recovery, compute_quant_diff, parse_eval_log
 from exq.eval.coverage import CoverageAnalyzer
 from exq.profiler.dense_profile import DenseProfile
 
@@ -55,7 +54,7 @@ DENSE_MODELS = {
 }
 
 
-def _compute_quant_diff(profile_path: str) -> float:
+def compute_quant_diff(profile_path: str) -> float:
     """Activation-weighted fraction of experts assigned higher-than-INT4 precision."""
     profile = RoutingProfile.load(profile_path)
     graph = py_build_routing_graph(profile)
@@ -116,7 +115,7 @@ def main() -> None:
         graph = py_build_routing_graph(profile)
         summary = py_graph_summary(graph)
         entropy = summary["avg_entropy"]
-        quant_diff = _compute_quant_diff(str(profile_path))
+        quant_diff = compute_quant_diff(str(profile_path))
 
         recovery = None
         eval_id = meta["eval_model_id"]

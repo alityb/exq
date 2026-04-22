@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import defaultdict
 from pathlib import Path
 
 from exq._core import (
@@ -21,28 +20,16 @@ from exq._core import (
     py_build_routing_graph,
     py_graph_summary,
 )
-from exq.eval.bench import compute_recovery_pct as compute_recovery
+from exq.eval.bench import (
+    compute_recovery_pct as compute_recovery,
+    compute_quant_diff,
+    parse_eval_log,
+)
 from exq.eval.coverage import CoverageAnalyzer
 from exq.profiler.dense_profile import DenseProfile
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
-
-def parse_eval_log(path: str | Path) -> dict[str, dict[str, dict[str, float]]]:
-    """Parse a tab-separated eval log into model -> precision -> benchmark -> value."""
-    records: dict[str, dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(dict))
-    with Path(path).open(encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line:
-                continue
-            model_id, precision, benchmark, value = line.split("\t")
-            records[model_id][precision][benchmark] = float(value)
-    return {
-        model_id: {p: dict(v) for p, v in precisions.items()}
-        for model_id, precisions in records.items()
-    }
-
 
 def _safe_load_json(path: Path) -> dict:
     if not path.exists():

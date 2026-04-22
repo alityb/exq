@@ -8,12 +8,10 @@ Data from results/int4_production_batch.json  (updated with optimized dispatch).
 """
 
 import json
-import sys
-sys.path.insert(0, "figures")
 
 import matplotlib.pyplot as plt
 import numpy as np
-from style import apply_style, CORAL, TEAL, DARK, save, bar_label
+from figures.style import apply_style, CORAL, TEAL, DARK, save, bar_label
 
 apply_style()
 

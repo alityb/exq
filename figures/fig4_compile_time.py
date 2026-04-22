@@ -5,12 +5,10 @@ Data from results/compile_stats.json, ordered by node count.
 """
 
 import json
-import sys
-sys.path.insert(0, "figures")
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
-from style import apply_style, CORAL, TEAL, DARK, save
+from figures.style import apply_style, CORAL, TEAL, DARK, save
 
 apply_style()
 

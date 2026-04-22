@@ -26,11 +26,10 @@ def main() -> None:
 
     from transformers import AutoTokenizer
     from exq.eval import compute_perplexity
+from exq.model_utils import fix_tokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
-    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
-        tokenizer.pad_token = tokenizer.eos_token
-
+    
     if args.provider == "awq":
         from awq import AutoAWQForCausalLM
 

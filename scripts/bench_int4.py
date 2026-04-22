@@ -20,18 +20,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import statistics
 import sys
-import time
 from pathlib import Path
 
 import torch
+from exq.eval.bench import bench
 
 from exq.kernels.moe_grouped_gemm import moe_grouped_gemm
-from exq.kernels.moe_int4_kernel import (
-    pack_experts_int4,
-    moe_int4_forward,
-)
+from exq.kernels import pack_experts_int4, moe_int4_forward
 
 
 MODEL_CONFIGS = {
@@ -42,23 +38,6 @@ MODEL_CONFIGS = {
 }
 
 
-def bench(fn, n_warmup=20, n_runs=100):
-    for _ in range(n_warmup):
-        fn()
-    torch.cuda.synchronize()
-    times = []
-    for _ in range(n_runs):
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        fn()
-        torch.cuda.synchronize()
-        times.append((time.perf_counter() - t0) * 1000)
-    times.sort()
-    n = len(times)
-    ci = 1.96 * statistics.stdev(times) / n**0.5
-    return {"p50": times[n//2], "p95": times[int(.95*(n-1))],
-            "p99": times[int(.99*(n-1))], "mean": statistics.mean(times),
-            "ci95": ci, "n": n}
 
 
 def verify_int4_correctness(

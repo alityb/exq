@@ -133,16 +133,8 @@ class RuntimePrefetchHook:
         )
 
     def _find_layers(self):
-        """Walk model to find transformer layers."""
-        for attr in ("model.layers", "model.model.layers"):
-            try:
-                obj = self.model
-                for part in attr.split("."):
-                    obj = getattr(obj, part)
-                return list(obj)
-            except AttributeError:
-                continue
-        return []
+        from exq.model_utils import find_transformer_layers
+        return find_transformer_layers(self.model) or []
 
     def _register_hooks(self) -> None:
         layers = self._find_layers()
@@ -223,9 +215,7 @@ def main() -> None:
     batch_sizes = [int(v.strip()) for v in args.batch_sizes.split(",") if v.strip()]
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
-        tokenizer.pad_token = tokenizer.eos_token
-
+    
     model = load_model(args.model, load_in_4bit=args.load_in_4bit)
 
     all_results = {}

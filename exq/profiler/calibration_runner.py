@@ -15,6 +15,7 @@ from typing import Any
 import torch
 
 from exq._core import RoutingProfile
+from exq.model_utils import fix_tokenizer
 from exq.hf_compat import patch_transformers_remote_code_compat
 from exq.profiler.routing_profiler import RoutingProfiler
 
@@ -80,9 +81,7 @@ class CalibrationRunner:
         patch_transformers_remote_code_compat()
         logger.info(f"Loading model: {self.model_id}")
         tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
-        if tokenizer.pad_token is None and tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-
+        
         offload_folder = os.environ.get("ExQ_OFFLOAD_DIR") or str(
             Path(tempfile.gettempdir()) / "rpgo_offload"
         )

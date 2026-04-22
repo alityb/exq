@@ -26,6 +26,7 @@ def main() -> None:
     args = parser.parse_args()
 
     from exq.codegen import emit_prefetch_kernels
+from exq.model_utils import fix_tokenizer
 
     artifact_path = Path(args.artifact)
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
@@ -64,9 +65,7 @@ def main() -> None:
         import torch
 
         tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-        if tokenizer.pad_token is None and tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        model = AutoModelForCausalLM.from_pretrained(
+                model = AutoModelForCausalLM.from_pretrained(
             args.model,
             torch_dtype=torch.float16,
             device_map="auto",

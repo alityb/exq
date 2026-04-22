@@ -294,24 +294,14 @@ def moe_int4_forward(
     _, N, K_packed = expert_packed.shape
     assert K_packed == K // 2, f"packed K={K_packed} != K//2={K//2}"
 
-    top_k    = router_indices.shape[1]
-    n_active = n_tokens_total * top_k
+    n_active = router_indices.shape[0] * router_indices.shape[1]
 
-    # Sort tokens by expert
-    flat_indices = router_indices.reshape(-1).long()
-    sort_order   = torch.argsort(flat_indices, stable=True)
-    sorted_ids   = flat_indices[sort_order]
-    orig_toks    = (sort_order // top_k).long()
-    sorted_hidden = hidden_states[orig_toks]  # [n_active, K]
-
-    # Expert boundary array
-    token_counts = torch.bincount(sorted_ids, minlength=n_experts)
-    expert_ends  = torch.zeros(n_experts + 1, dtype=torch.int32, device="cuda")
-    expert_ends[1:] = token_counts.cumsum(0).int()
+    from exq.kernels.moe_grouped_gemm import sort_tokens_by_expert
+    sort_order, sorted_hidden, expert_ends, max_tokens = sort_tokens_by_expert(
+        router_indices, hidden_states, n_experts)
 
     output = torch.zeros(n_active, N, dtype=torch.float16, device="cuda")
 
-    max_tokens = int(token_counts.max().item()) if n_active > 0 else 1
     n_m_tiles  = max((max_tokens + block_m - 1) // block_m, 1)
     n_n_tiles  = (N + block_n - 1) // block_n
     grid = (n_experts, n_m_tiles, n_n_tiles)
@@ -377,21 +367,13 @@ def moe_int4_full_forward(
     n_tokens, H = hidden_states.shape
     _, inter2, _ = w13_packed.shape          # inter2 = 2 * intermediate_size
     inter = inter2 // 2
-    top_k = router_indices.shape[1]
-    n_active = n_tokens * top_k
+    n_active = n_tokens * router_indices.shape[1]
 
-    # ── Sort tokens once ─────────────────────────────────────────────────────
-    flat       = router_indices.reshape(-1).long()
-    sort_order = torch.argsort(flat, stable=True)
-    sorted_ids = flat[sort_order]
-    sorted_h   = hidden_states[(sort_order // top_k).long()]  # [n_active, H]
-
-    # Expert boundaries (shared between GEMM1 and GEMM2)
-    tc = torch.bincount(sorted_ids, minlength=n_experts)
-    ee = torch.zeros(n_experts + 1, dtype=torch.int32, device="cuda")
-    ee[1:] = tc.cumsum(0).int()
-    max_tok = int(tc.max().item()) if n_active > 0 else 1
-    unsort  = torch.argsort(sort_order, stable=True)
+    # ── Sort tokens once (shared between GEMM1 and GEMM2) ────────────────────
+    from exq.kernels.moe_grouped_gemm import sort_tokens_by_expert
+    sort_order, sorted_h, ee, max_tok = sort_tokens_by_expert(
+        router_indices, hidden_states, n_experts)
+    unsort = torch.argsort(sort_order, stable=True)
 
     # Guard block sizes
     n_groups_actual   = w13_scales.shape[2]

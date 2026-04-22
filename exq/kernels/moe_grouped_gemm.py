@@ -133,6 +133,40 @@ def _moe_gemm_kernel(
 
 
 # ---------------------------------------------------------------------------
+# Shared dispatch helper
+# ---------------------------------------------------------------------------
+
+def sort_tokens_by_expert(
+    router_indices: torch.Tensor,   # [n_tokens, top_k]
+    hidden_states: torch.Tensor,    # [n_tokens, K]
+    n_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sort tokens by expert assignment and build the expert boundary array.
+
+    This is the core dispatch step shared by every ExQ GEMM variant.
+    Returns:
+        sort_order      [n_active]     — original flat slot for each sorted row
+        sorted_hidden   [n_active, K]  — hidden states in expert-sorted order
+        expert_ends     [n_experts+1]  — prefix-sum boundary array
+        max_tok         int            — max tokens any single expert receives
+    """
+    top_k    = router_indices.shape[1]
+    n_active = router_indices.shape[0] * top_k
+
+    flat         = router_indices.reshape(-1).long()
+    sort_order   = torch.argsort(flat, stable=True)
+    sorted_ids   = flat[sort_order]
+    sorted_hidden = hidden_states[(sort_order // top_k).long()]
+
+    counts       = torch.bincount(sorted_ids, minlength=n_experts)
+    expert_ends  = torch.zeros(n_experts + 1, dtype=torch.int32, device="cuda")
+    expert_ends[1:] = counts.cumsum(0).int()
+    max_tok      = int(counts.max().item()) if n_active > 0 else 1
+
+    return sort_order, sorted_hidden, expert_ends, max_tok
+
+
+# ---------------------------------------------------------------------------
 # Python wrapper
 # ---------------------------------------------------------------------------
 
@@ -163,33 +197,16 @@ def moe_grouped_gemm(
     _, N, K2 = expert_weights.shape
     assert K == K2, f"K mismatch: hidden_states K={K}, expert_weights K={K2}"
 
-    top_k = router_indices.shape[1]
-    n_active = n_tokens_total * top_k
+    n_active = n_tokens_total * router_indices.shape[1]
 
-    # --- Sort tokens by expert ---------------------------------------------
-    flat_indices = router_indices.reshape(-1)  # [n_active]
-    sort_order   = torch.argsort(flat_indices.long(), stable=True)
-    sorted_expert_ids = flat_indices[sort_order].long()
-
-    # Each active slot i corresponds to original token i // top_k
-    original_token_ids = (sort_order // top_k).long()
-    sorted_hidden = hidden_states[original_token_ids]  # [n_active, K]
-
-    # --- Compute expert boundary array (prefix sum) -------------------------
-    # expert_ends[e] = first index in sorted array NOT belonging to expert e
-    # Using bincount + cumsum is exact and avoids a Python loop
-    token_counts = torch.bincount(sorted_expert_ids, minlength=n_experts)
-    expert_ends  = torch.zeros(n_experts + 1, dtype=torch.int32, device="cuda")
-    expert_ends[1:] = token_counts.cumsum(0).int()
+    sort_order, sorted_hidden, expert_ends, max_tok = sort_tokens_by_expert(
+        router_indices, hidden_states, n_experts)
 
     # --- Allocate output ---------------------------------------------------
     output = torch.zeros(n_active, N, dtype=torch.float16, device="cuda")
 
     # --- Launch kernel -----------------------------------------------------
-    # Grid: (n_experts, max_m_tiles, n_n_tiles)
-    # M-tiles and N-tiles beyond an expert's actual size return immediately.
-    max_tokens_per_expert = int(token_counts.max().item()) if n_active > 0 else 1
-    max_m_tiles = (max_tokens_per_expert + block_m - 1) // block_m
+    max_m_tiles = (max_tok + block_m - 1) // block_m
     n_n_tiles   = (N + block_n - 1) // block_n
     grid = (n_experts, max(max_m_tiles, 1), n_n_tiles)
 
