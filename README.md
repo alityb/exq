@@ -119,10 +119,36 @@ The Rust core handles the full compiler pipeline. Python handles model loading, 
 **The fair comparison:** both kernels receive the exact same RTN-packed INT4
 weights (uint8, two values per byte, group_size=128 per-group fp16 scales).
 SGLang uses `fused_experts_impl` with `use_int4_w4a16=True, block_shape=[0,128]`,
-which dispatches to its `fused_moe_kernel_gptq_awq` kernel.
-ExQ uses its sorted-token grouped GEMM with on-chip dequantization.
-Both execute the full MoE forward pass (gate+up → SiLU → down → weighted combine).
-Outputs agree to <0.4% relative error (expected: both use the same RTN-quantized weights).
+dispatching to its `fused_moe_kernel_gptq_awq` Triton kernel.
+ExQ uses `moe_int4_full_forward`: sorts tokens once, runs gate+up → SiLU → down
+in two Triton kernel launches sharing the same sort, then combines.
+Outputs agree to <0.4% relative error (same RTN-quantized weights).
+
+| Model | Batch | SGLang INT4 | ExQ INT4 | Δ |
+|---|---|---|---|---|
+| OLMoE-1B-7B | 1 | 1.054 ms | 1.147 ms | −8.8% |
+| OLMoE-1B-7B | 2 | 1.935 ms | 1.292 ms | **+33%** |
+| OLMoE-1B-7B | 4 | 1.944 ms | 1.362 ms | **+30%** |
+| OLMoE-1B-7B | 8 | 1.966 ms | 1.514 ms | **+23%** |
+| Qwen3-30B-A3B | 1 | 1.753 ms | 1.761 ms | −0.4% |
+| Qwen3-30B-A3B | 2 | 1.782 ms | 1.890 ms | −6.1% |
+| Qwen3-30B-A3B | 4 | 2.854 ms | 2.156 ms | **+25%** |
+| Qwen3-30B-A3B | 8 | 2.919 ms | 2.704 ms | **+7%** |
+
+A10G, seqlen=64, 200-run P50.
+
+**At batch≥2 for OLMoE and batch≥4 for Qwen3, ExQ wins by 7–33%.**
+The speedup comes from sorted-token dispatch: tokens are grouped by expert before
+the GEMM, turning scattered reads into sequential HBM access. ExQ sorts once and
+reuses the sort for both the gate+up and down projections.
+
+**At batch=1, ExQ is within 1–9% of SGLang.** SGLang's kernel fuses the entire
+forward pass (gate+up+SiLU+down+combine) into one Triton kernel launch;
+ExQ uses two launches and ~0.27 ms of Python boundary overhead for sorting.
+At 64 tokens/64 experts = 1 token per expert on average, this overhead is
+proportionally large. At batch≥2 the compute dominates and ExQ's sorted
+dispatch wins.
+
 
 | Model | Batch | SGLang INT4 | ExQ INT4 | Δ |
 |---|---|---|---|---|
