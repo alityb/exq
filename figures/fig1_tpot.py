@@ -2,9 +2,9 @@
 Fig 1 — Headline result: ExQ INT4 vs SGLang INT4
 
 Fair comparison: same RTN-packed INT4 weights passed to both kernels.
-Shows the batches where ExQ wins (≥128 for OLMoE, ≥256 for Qwen3).
+Shows the batches where ExQ wins most clearly.
 
-Data from results/int4_production_batch.json.
+Data from results/int4_production_batch.json  (updated with optimized dispatch).
 """
 
 import json
@@ -19,8 +19,7 @@ apply_style()
 
 prod = json.load(open("results/int4_production_batch.json"))
 
-# ── Pick the three most compelling operating points ───────────────────────────
-# OLMoE batch=128 (+28%), OLMoE batch=256 (+27%), Qwen3 batch=256 (+25%)
+# ── Operating points: OLMoE batch=128 (+38%), OLMoE batch=256 (+35%), Qwen3 batch=256 (+33%)
 points = [
     ("OLMoE\nbatch=128",
      prod["olmoe"]["batch_sweep"]["128"]["sglang_p50"],
