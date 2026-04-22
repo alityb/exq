@@ -75,6 +75,26 @@ __global__ void build_ends_kernel(
     atomicAdd(&expert_ends[sorted_expert_ids[i] + 1], 1);
 }
 
+// ── build_ends_from_slot_ids ─────────────────────────────────────────────────
+// Variant that takes flat slot IDs (from sgl_moe_align) and a flat
+// router index array, and atomically builds expert_ends.
+// slot_ids[i] = original flat slot index (< n_active) or padding (>= n_active)
+// flat_router[slot_id] = expert_id for that slot
+__global__ void build_ends_from_slots_kernel(
+    const int32_t* __restrict__ slot_ids,    // [EM]  from moe_align, may include padding
+    const int32_t* __restrict__ flat_router, // [n_active]  r_idx.reshape(-1)
+    int32_t*       __restrict__ expert_ends, // [n_experts+1]  zeroed by caller
+    int32_t n_active,
+    int32_t EM
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= EM) return;
+    int32_t slot = slot_ids[i];
+    if (slot >= n_active) return;   // padding token
+    int32_t expert = flat_router[slot];
+    atomicAdd(&expert_ends[expert + 1], 1);
+}
+
 // ── exq_dispatch ─────────────────────────────────────────────────────────────
 void exq_dispatch(
     torch::Tensor router_indices,
@@ -127,6 +147,88 @@ void exq_dispatch(
         expert_ends.data_ptr<int32_t>() + 1,
         (int)n_experts, stream);
 }
+
+// ── compact_valid_slots_kernel ────────────────────────────────────────────────
+// Write 1 for valid (non-padding) slots, 0 for padding.
+// Then use CUB scan + scatter to compact in order.
+// But since we don't want CUB overhead, use a different strategy:
+//
+// Direct approach: each valid slot at position i writes to output
+// at position (its index in the per-expert sorted list) using expert_ends.
+// Since sorted_slot_ids is sorted by expert already, we can use a
+// per-expert atomic counter.
+__global__ void compact_via_expert_counter_kernel(
+    const int32_t* __restrict__ slot_ids,        // [EM]
+    const int32_t* __restrict__ flat_router,     // [n_active]
+    const int32_t* __restrict__ expert_ends,     // [n_experts+1]
+    int32_t*       __restrict__ expert_cursors,  // [n_experts] atomic cursors (init = expert_ends[0..n-1])
+    int64_t*       __restrict__ sort_order,      // [n_active] output
+    int32_t n_active,
+    int32_t EM
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= EM) return;
+    int32_t slot = slot_ids[i];
+    if (slot >= n_active) return;  // padding
+
+    int32_t expert = flat_router[slot];
+    // Atomically claim the next position for this expert
+    int pos = atomicAdd(&expert_cursors[expert], 1);
+    sort_order[pos] = (int64_t)slot;
+}
+
+// ── exq_build_ends_from_slots ─────────────────────────────────────────────────
+void exq_build_ends_from_slots(
+    torch::Tensor sorted_slot_ids,  // [EM] int32  from moe_align
+    torch::Tensor flat_router,      // [n_active] int32  = r_idx.reshape(-1)
+    torch::Tensor expert_ends,      // [n_experts+1] int32  output (pre-zeroed)
+    torch::Tensor sort_order,       // [n_active] int64  output
+    int64_t n_active,
+    int64_t n_experts
+) {
+    auto stream = at::cuda::getCurrentCUDAStream();
+    int64_t EM  = sorted_slot_ids.numel();
+
+    // Step 1: build expert_ends histogram from slot → expert lookup
+    expert_ends.zero_();
+    int thr = 256, blk = ((int)EM + thr - 1) / thr;
+    build_ends_from_slots_kernel<<<blk, thr, 0, stream>>>(
+        sorted_slot_ids.data_ptr<int32_t>(),
+        flat_router.data_ptr<int32_t>(),
+        expert_ends.data_ptr<int32_t>(),
+        (int32_t)n_active, (int32_t)EM);
+
+    // Step 2: prefix sum for expert_ends
+    void* tmp2 = nullptr; size_t tmp2_b = 0;
+    cub::DeviceScan::InclusiveSum(tmp2, tmp2_b,
+        expert_ends.data_ptr<int32_t>() + 1,
+        expert_ends.data_ptr<int32_t>() + 1,
+        (int)n_experts, stream);
+    auto t2 = torch::empty({(int64_t)tmp2_b},
+        torch::TensorOptions().dtype(torch::kUInt8)
+            .device(sorted_slot_ids.device()));
+    tmp2 = t2.data_ptr();
+    cub::DeviceScan::InclusiveSum(tmp2, tmp2_b,
+        expert_ends.data_ptr<int32_t>() + 1,
+         expert_ends.data_ptr<int32_t>() + 1,
+         (int)n_experts, stream);
+
+    // Step 3: compact sorted_slot_ids → sort_order using per-expert cursors.
+    // expert_ends[e] = start of expert e's range in sort_order.
+    // Each valid slot atomically claims the next slot in its expert's range.
+    // Result: sort_order is filled in expert-boundary-respecting order.
+    auto cursors = expert_ends.slice(0, 0, n_experts).clone();
+    int thr3 = 256, blk3 = ((int)EM + thr3 - 1) / thr3;
+    compact_via_expert_counter_kernel<<<blk3, thr3, 0, stream>>>(
+        sorted_slot_ids.data_ptr<int32_t>(),
+        flat_router.data_ptr<int32_t>(),
+        expert_ends.data_ptr<int32_t>(),
+        cursors.data_ptr<int32_t>(),
+        sort_order.data_ptr<int64_t>(),
+        (int32_t)n_active, (int32_t)EM);
+}
+
+
 
 // ── exq_gather_hidden ─────────────────────────────────────────────────────────
 __global__ void gather_hidden_vec_kernel(
@@ -208,7 +310,9 @@ void exq_combine(
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("dispatch",      &exq_dispatch);
+    m.def("dispatch",               &exq_dispatch);
+    m.def("build_ends_from_slots",  &exq_build_ends_from_slots,
+          "Build expert_ends from moe_align_block_size sorted_slot_ids output");
     m.def("gather_hidden", &exq_gather_hidden);
     m.def("combine",       &exq_combine);
 }
