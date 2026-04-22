@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from rpgo._core import (
+from exq._core import (
     ExpertStats,
     LayerProfile,
     RoutingProfile,

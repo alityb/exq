@@ -8,7 +8,7 @@ import json
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="R-PGO KL divergence evaluation")
+    parser = argparse.ArgumentParser(description="ExQ KL divergence evaluation")
     parser.add_argument("--reference-model", required=True)
     parser.add_argument("--candidate-model", required=True)
     parser.add_argument("--candidate-precision", required=True, choices=["fp16", "int4", "rpgo", "rpgo_dense", "awq_controlled"])
@@ -22,7 +22,7 @@ def main() -> None:
     parser.add_argument("--max-length", type=int, default=256)
     args = parser.parse_args()
 
-    from rpgo.eval import compute_kl_divergence, load_model_and_tokenizer, load_model_variant, resolve_benchmark
+    from exq.eval import compute_kl_divergence, load_model_and_tokenizer, load_model_variant, resolve_benchmark
 
     ref_model, tokenizer = load_model_and_tokenizer(args.reference_model)
     cand_model, _ = load_model_variant(

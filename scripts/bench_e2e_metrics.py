@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end inference benchmark for R-PGO.
+"""End-to-end inference benchmark for ExQ.
 
 Measures real generation metrics on a fixed GPU using actual `generate()` calls:
   - TTFT: time to first token
@@ -9,7 +9,7 @@ Measures real generation metrics on a fixed GPU using actual `generate()` calls:
 Compares three conditions:
   A) Baseline model
   B) Runtime predictor hook (per-token overhead)
-  C) R-PGO compiled static runtime (artifact-patched model)
+  C) ExQ compiled static runtime (artifact-patched model)
 
 This avoids simulation language: every metric comes from real inference on a
 real model with the actual Hugging Face generation stack.
@@ -26,7 +26,7 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from rpgo.runtime import CompiledInference
+from exq.runtime import CompiledInference
 from scripts.bench_latency import RuntimePrefetchHook
 
 
@@ -95,7 +95,7 @@ def _benchmark_condition(model, inputs, n_tokens: int, n_runs: int, warmup: int)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="R-PGO end-to-end metrics benchmark")
+    parser = argparse.ArgumentParser(description="ExQ end-to-end metrics benchmark")
     parser.add_argument("--model", required=True)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--artifact", required=True)
@@ -145,7 +145,7 @@ def main() -> None:
     print(f"Throughput p50: {runtime_pred['throughput_toks_per_s']['p50']:.1f} tok/s")
 
     # C) Compiled static
-    print("\n=== C: R-PGO compiled static ===")
+    print("\n=== C: ExQ compiled static ===")
     engine = CompiledInference.from_artifact(args.artifact, model, tokenizer)
     compiled = _benchmark_condition(model, inputs, args.n_tokens, args.n_runs, args.warmup)
     print(f"TTFT p50: {compiled['ttft_ms']['p50']:.1f}ms")
@@ -160,7 +160,7 @@ def main() -> None:
         "n_runs": args.n_runs,
         "baseline": baseline,
         "runtime_predictor": runtime_pred,
-        "rpgo_compiled": compiled,
+        "exq_compiled": compiled,
     }
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)

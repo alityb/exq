@@ -1,4 +1,4 @@
-//! R-PGO: Routing-Profile-Guided Optimization for MoE Inference.
+//! ExQ: Routing-Profile-Guided Optimization for MoE Inference.
 //!
 //! Rust core exposing profile parsing, routing graph IR, compiler passes,
 //! and codegen via PyO3 to a thin Python boundary layer.
@@ -11,7 +11,7 @@ pub mod profile;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
-/// Python module entry-point: `rpgo._core`
+/// Python module entry-point: `exq._core`
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // -- profile types --

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""CLI: Evaluate GSM8K accuracy for fp16, R-PGO, or uniform INT4."""
+"""CLI: Evaluate GSM8K accuracy for fp16, ExQ, or uniform INT4."""
 
 import argparse
 import json
 import logging
 
-from rpgo.eval import append_eval_result, apply_precision_to_model, load_model_and_tokenizer
+from exq.eval import append_eval_result, apply_precision_to_model, load_model_and_tokenizer
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="R-PGO: Evaluate GSM8K")
+    parser = argparse.ArgumentParser(description="ExQ: Evaluate GSM8K")
     parser.add_argument("--model", required=True, help="Hugging Face model id")
     parser.add_argument("--precision", required=True, choices=["fp16", "rpgo", "int4"])
     parser.add_argument("--profile", help="Routing profile path required for rpgo")

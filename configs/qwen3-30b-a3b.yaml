@@ -1,4 +1,4 @@
-# R-PGO config: Qwen3-30B-A3B (primary dev target)
+# ExQ config: Qwen3-30B-A3B (primary dev target)
 model_id: "Qwen/Qwen3-30B-A3B"
 calibration_samples: 2048
 max_length: 512

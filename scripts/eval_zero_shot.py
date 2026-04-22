@@ -21,7 +21,7 @@ DEFAULT_TASKS = [
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="R-PGO zero-shot accuracy suite")
+    parser = argparse.ArgumentParser(description="ExQ zero-shot accuracy suite")
     parser.add_argument("--model", required=True)
     parser.add_argument("--precision", required=True, choices=["fp16", "int4", "rpgo", "rpgo_dense", "awq_controlled"])
     parser.add_argument("--profile")
@@ -35,7 +35,7 @@ def main() -> None:
 
     from lm_eval import simple_evaluate
     from lm_eval.models.huggingface import HFLM
-    from rpgo.eval import load_model_variant
+    from exq.eval import load_model_variant
 
     model, tokenizer = load_model_variant(
         args.model,

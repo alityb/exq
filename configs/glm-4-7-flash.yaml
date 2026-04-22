@@ -1,4 +1,4 @@
-# R-PGO config: GLM-4.7-Flash
+# ExQ config: GLM-4.7-Flash
 model_id: "zai-org/GLM-4.7-Flash"
 calibration_samples: 512
 max_length: 256

@@ -9,8 +9,8 @@ import sys
 
 import torch
 
-from rpgo.hf_compat import patch_transformers_remote_code_compat
-from rpgo.profiler.attention_profiler import AttentionProfiler
+from exq.hf_compat import patch_transformers_remote_code_compat
+from exq.profiler.attention_profiler import AttentionProfiler
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -25,7 +25,7 @@ def _model_device(model) -> torch.device:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="R-PGO: Collect attention head profile (dense models)"
+        description="ExQ: Collect attention head profile (dense models)"
     )
     parser.add_argument("--model", required=True, help="Hugging Face model ID")
     parser.add_argument("--samples", type=int, default=512)

@@ -1,4 +1,4 @@
-# R-PGO config: DeepSeek-V2-Lite (smoke test model)
+# ExQ config: DeepSeek-V2-Lite (smoke test model)
 model_id: "deepseek-ai/DeepSeek-V2-Lite"
 calibration_samples: 512
 max_length: 256

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a compiled R-PGO artifact and generated kernel module.
+"""Validate a compiled ExQ artifact and generated kernel module.
 
 Checks:
 1. Artifact schema sanity
@@ -25,7 +25,7 @@ def main() -> None:
     parser.add_argument("--model")
     args = parser.parse_args()
 
-    from rpgo.codegen import emit_prefetch_kernels
+    from exq.codegen import emit_prefetch_kernels
 
     artifact_path = Path(args.artifact)
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
@@ -60,7 +60,7 @@ def main() -> None:
 
     if args.model:
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        from rpgo.runtime import CompiledInference
+        from exq.runtime import CompiledInference
         import torch
 
         tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)

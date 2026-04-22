@@ -8,11 +8,11 @@ import pytest
 import torch
 import torch.nn as nn
 
-from rpgo._core import LayerProfile, RoutingProfile
-from rpgo.hf_compat import patch_transformers_remote_code_compat
-from rpgo.eval.modeling import apply_precision_to_model, compile_quant_plan, model_slug, resolve_offload_folder
-from rpgo.eval.quant_shim import apply_quant_plan_to_model, apply_uniform_int4, quantize_tensor_int4, quantize_tensor_int8
-from rpgo.eval.quality import append_eval_result, resolve_benchmark
+from exq._core import LayerProfile, RoutingProfile
+from exq.hf_compat import patch_transformers_remote_code_compat
+from exq.eval.modeling import apply_precision_to_model, compile_quant_plan, model_slug, resolve_offload_folder
+from exq.eval.quant_shim import apply_quant_plan_to_model, apply_uniform_int4, quantize_tensor_int4, quantize_tensor_int8
+from exq.eval.quality import append_eval_result, resolve_benchmark
 from scripts.make_results_table import parse_eval_log
 
 
@@ -58,7 +58,7 @@ def test_model_slug():
 
 def test_resolve_offload_folder_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     offload_dir = tmp_path / "offload"
-    monkeypatch.setenv("RPGO_OFFLOAD_DIR", str(offload_dir))
+    monkeypatch.setenv("ExQ_OFFLOAD_DIR", str(offload_dir))
     resolved = resolve_offload_folder()
     assert resolved == str(offload_dir)
     assert offload_dir.is_dir()

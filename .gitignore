@@ -17,14 +17,15 @@ build/
 .vscode/
 *.swp
 
-# R-PGO artifacts
-profiles/
-*.json
-!routing_profile.json
-!configs/*.yaml
+# Model / HuggingFace cache
+.hf_cache/
 
-# Spec
-AGENTS.md
+# ExQ generated outputs (profiles, artifacts, results)
+profiles/
+artifacts/
+results/
+*.json
+!configs/*.yaml
 
 # OS
 .DS_Store

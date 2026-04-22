@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Evaluate an external quantized checkpoint against R-PGO results.
+"""Evaluate an external quantized checkpoint against ExQ results.
 
 This is used to compare against production quantizers like AWQ/GPTQ without
-changing the core R-PGO pipeline. It loads a pre-quantized checkpoint and
-measures perplexity on the same benchmarks used for R-PGO.
+changing the core ExQ pipeline. It loads a pre-quantized checkpoint and
+measures perplexity on the same benchmarks used for ExQ.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ def main() -> None:
     args = parser.parse_args()
 
     from transformers import AutoTokenizer
-    from rpgo.eval import compute_perplexity
+    from exq.eval import compute_perplexity
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
     if tokenizer.pad_token is None and tokenizer.eos_token is not None:

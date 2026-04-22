@@ -573,7 +573,7 @@ mod tests {
         let lp = make_test_layer(8, 2);
         profile.layers.insert(0, lp);
 
-        let tmp = std::env::temp_dir().join("rpgo_test_profile.json");
+        let tmp = std::env::temp_dir().join("exq_test_profile.json");
         profile.save(&tmp).unwrap();
         let loaded = RoutingProfile::load(&tmp).unwrap();
         assert_eq!(loaded.model_id, "file-test");

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compute the coverage-versus-recovery summary table for R-PGO.
+"""Compute the coverage-versus-recovery summary table for ExQ.
 
 Shows that the compiler's compile-time diagnostics (entropy, quant
 differentiation) correctly predict downstream PPL recovery.
@@ -9,18 +9,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 
-from rpgo._core import (
+from exq._core import (
     CompilerPipeline,
     RoutingProfile,
     py_build_routing_graph,
     py_graph_summary,
 )
-from rpgo.eval.coverage import CoverageAnalyzer
-from rpgo.profiler.dense_profile import DenseProfile
-from scripts.make_results_table import parse_eval_log
+from exq.eval.bench import compute_recovery_pct as compute_recovery
+from exq.eval.bench import parse_eval_log
+from exq.eval.coverage import CoverageAnalyzer
+from exq.profiler.dense_profile import DenseProfile
 
 
 MOE_MODELS = {
@@ -53,13 +53,6 @@ DENSE_MODELS = {
         "eval_model_id": "Qwen/Qwen2.5-1.5B",
     },
 }
-
-
-def compute_recovery(fp16: float, rpgo: float, int4: float) -> float:
-    denom = int4 - fp16
-    if not math.isfinite(denom) or denom <= 0:
-        return 0.0
-    return (int4 - rpgo) / denom * 100.0
 
 
 def _compute_quant_diff(profile_path: str) -> float:
@@ -95,7 +88,7 @@ def _fmt(value: float | None, percent: bool = False) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="R-PGO: Coverage versus recovery summary"
+        description="ExQ: Coverage versus recovery summary"
     )
     parser.add_argument("--moe-log", default="results/eval_log.txt")
     parser.add_argument("--dense-log", default="results/eval_log_dense.txt")

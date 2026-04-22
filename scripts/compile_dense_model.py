@@ -7,15 +7,15 @@ import argparse
 import json
 import logging
 
-from rpgo.compiler.dense_quant_planner import plan_dense_quant
-from rpgo.profiler.dense_profile import DenseProfile
+from exq.compiler.dense_quant_planner import plan_dense_quant
+from exq.profiler.dense_profile import DenseProfile
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="R-PGO: Compile dense model from attention profile"
+        description="ExQ: Compile dense model from attention profile"
     )
     parser.add_argument("--profile", required=True)
     parser.add_argument("--output", default="artifacts/dense_artifact.json")

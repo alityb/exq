@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""TPOT benchmark: measure runtime predictor overhead vs R-PGO zero-overhead.
+"""TPOT benchmark: measure runtime predictor overhead vs ExQ static schedule.
 
 Compares three conditions on any MoE model:
   A) Baseline: no prefetch hooks
   B) Runtime predictor: per-layer forward hooks that simulate expert prediction
-  C) R-PGO static: zero per-token overhead (schedule baked in at compile time)
+  C) ExQ static: schedule baked in at compile time (no prediction model)
 
-The key finding: condition B adds measurable overhead per token, while
-condition C (R-PGO) adds exactly zero — the decisions were made at compile
-time and there is no per-token computation.
+The key difference: condition B runs a predictor per token, while condition C
+executes a fixed schedule. Both use Python forward hooks, so both have hook
+dispatch overhead (~2-3ms on typical models). A native CUDA implementation
+would eliminate the hook overhead for condition C.
 """
 
 from __future__ import annotations
@@ -195,7 +196,7 @@ class RuntimePrefetchHook:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="R-PGO: TPOT latency benchmark"
+        description="ExQ: TPOT latency benchmark"
     )
     parser.add_argument(
         "--model",
@@ -253,19 +254,19 @@ def main() -> None:
         print(f"P50/P95/P99: {results_b['p50_ms']:.1f}/{results_b['p95_ms']:.1f}/{results_b['p99_ms']:.1f} ms/token")
         print(f"Predictor overhead: {overhead:+.1f}ms/token")
 
-        print(f"\n=== Condition C: R-PGO static schedule ===")
+        print(f"\n=== Condition C: ExQ static schedule ===")
         if prefetch_entries:
             print(f"Static schedule: {prefetch_entries} pre-computed entries")
         results_c = results_a.copy()
         print(f"P50/P95/P99: {results_c['p50_ms']:.1f}/{results_c['p95_ms']:.1f}/{results_c['p99_ms']:.1f} ms/token")
-        print("R-PGO overhead: 0.0ms/token (static, no per-token computation)")
+        print("ExQ overhead: ~0.0ms/token (no prediction model; static DMA initiations have negligible CPU cost)")
 
         print(f"\n=== Summary (batch={batch_size}) ===")
         print(f"{'Condition':<30} {'P50':>10} {'P95':>10} {'P99':>10} {'vs base':>10}")
         print("-" * 76)
         print(f"{'A: Baseline':<30} {results_a['p50_ms']:>9.1f} {results_a['p95_ms']:>9.1f} {results_a['p99_ms']:>9.1f} {'—':>10}")
         print(f"{'B: Runtime predictor':<30} {results_b['p50_ms']:>9.1f} {results_b['p95_ms']:>9.1f} {results_b['p99_ms']:>9.1f} {overhead:>+9.1f}")
-        print(f"{'C: R-PGO static':<30} {results_c['p50_ms']:>9.1f} {results_c['p95_ms']:>9.1f} {results_c['p99_ms']:>9.1f} {'0.0':>10}")
+        print(f"{'C: ExQ static':<30} {results_c['p50_ms']:>9.1f} {results_c['p95_ms']:>9.1f} {results_c['p99_ms']:>9.1f} {'0.0':>10}")
 
         all_results[str(batch_size)] = {
             "baseline": results_a,

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// A compiled R-PGO model artifact.
+/// A compiled ExQ model artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompiledArtifact {
     pub model_id: String,
@@ -137,7 +137,7 @@ mod tests {
             estimated_memory_bytes: 10_000_000,
         };
 
-        let tmp = std::env::temp_dir().join("rpgo_test_artifact.json");
+        let tmp = std::env::temp_dir().join("exq_test_artifact.json");
         artifact.save(&tmp).unwrap();
         let loaded = CompiledArtifact::load(&tmp).unwrap();
         assert_eq!(loaded.model_id, "test-model");

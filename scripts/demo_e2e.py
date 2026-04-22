@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""R-PGO End-to-End Demo: Profile → Compile → Execute → Measure.
+"""ExQ End-to-End Demo: Profile → Compile → Execute → Measure.
 
-This script demonstrates the complete R-PGO compiler pipeline on a real model,
+This script demonstrates the complete ExQ compiler pipeline on a real model,
 producing actual compiled inference with measurable performance characteristics.
 
 Usage:
@@ -19,7 +19,7 @@ import torch
 
 
 def main():
-    parser = argparse.ArgumentParser(description="R-PGO End-to-End Compiler Demo")
+    parser = argparse.ArgumentParser(description="ExQ End-to-End Compiler Demo")
     parser.add_argument("--model", default="allenai/OLMoE-1B-7B-0924")
     parser.add_argument("--profile", default=None, help="Pre-computed profile (skip profiling)")
     parser.add_argument("--artifact", default=None, help="Pre-compiled artifact (skip compilation)")
@@ -29,7 +29,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 70)
-    print("  R-PGO: Routing-Profile-Guided Optimization — End-to-End Demo")
+    print("  ExQ: Routing-Profile-Guided Optimization — End-to-End Demo")
     print("=" * 70)
     print()
 
@@ -67,7 +67,7 @@ def main():
 
     if artifact_path is None:
         print("Phase 2: COMPILATION")
-        from rpgo._core import CompilerPipeline, RoutingProfile, py_build_routing_graph
+        from exq._core import CompilerPipeline, RoutingProfile, py_build_routing_graph
 
         t0 = time.perf_counter()
         profile = RoutingProfile.load(profile_path)
@@ -153,9 +153,9 @@ def main():
     base_median = sorted(times_base)[len(times_base) // 2]
     print(f"  Baseline TPOT: {base_median:.1f}ms/token")
 
-    # ── R-PGO Compiled ──
-    print("  --- R-PGO Compiled (with prefetch scheduling) ---")
-    from rpgo.runtime import CompiledInference
+    # ── ExQ Compiled ──
+    print("  --- ExQ Compiled (with prefetch scheduling) ---")
+    from exq.runtime import CompiledInference
 
     engine = CompiledInference.from_artifact(artifact_path, model, tokenizer)
 
@@ -191,7 +191,7 @@ def main():
     print(f"  {'Condition':<25} {'TPOT':>10} {'vs Baseline':>12}")
     print(f"  {'-'*49}")
     print(f"  {'Baseline':<25} {base_median:>9.1f}ms {'—':>12}")
-    print(f"  {'R-PGO Compiled':<25} {comp_median:>9.1f}ms {delta:>+11.1f}ms")
+    print(f"  {'ExQ Compiled':<25} {comp_median:>9.1f}ms {delta:>+11.1f}ms")
     print()
 
     # Generate sample output

@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="R-PGO: Collect routing profile")
+    parser = argparse.ArgumentParser(description="ExQ: Collect routing profile")
     parser.add_argument("--model", type=str, help="HuggingFace model ID")
     parser.add_argument("--samples", type=int, default=2048, help="Calibration samples")
     parser.add_argument("--max-length", type=int, default=512, help="Max sequence length")
@@ -30,10 +30,10 @@ def main():
         import yaml
         with open(args.config) as f:
             config = yaml.safe_load(f)
-        from rpgo.profiler.calibration_runner import run_calibration_from_config
+        from exq.profiler.calibration_runner import run_calibration_from_config
         profile = run_calibration_from_config(config)
     elif args.model:
-        from rpgo.profiler.calibration_runner import CalibrationRunner
+        from exq.profiler.calibration_runner import CalibrationRunner
         runner = CalibrationRunner(
             model_id=args.model,
             n_samples=args.samples,

@@ -1,4 +1,4 @@
-# R-PGO config: Mixtral-8x7B (prior art baseline)
+# ExQ config: Mixtral-8x7B (prior art baseline)
 model_id: "mistralai/Mixtral-8x7B-v0.1"
 calibration_samples: 2048
 max_length: 512

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from rpgo.compiler.dense_quant_planner import compute_thresholds, plan_dense_quant
-from rpgo.profiler.dense_profile import DenseProfile, HeadLayerProfile
+from exq.compiler.dense_quant_planner import compute_thresholds, plan_dense_quant
+from exq.profiler.dense_profile import DenseProfile, HeadLayerProfile
 
 
 def _make_dense_profile() -> DenseProfile:

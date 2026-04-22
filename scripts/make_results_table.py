@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the paper-facing R-PGO result tables.
+"""Generate the paper-facing ExQ result tables.
 
 Tables:
   1. Compilation performance (nodes, edges, compile time)
@@ -15,14 +15,15 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from rpgo._core import (
+from exq._core import (
     CompilerPipeline,
     RoutingProfile,
     py_build_routing_graph,
     py_graph_summary,
 )
-from rpgo.eval.coverage import CoverageAnalyzer
-from rpgo.profiler.dense_profile import DenseProfile
+from exq.eval.bench import compute_recovery_pct as compute_recovery
+from exq.eval.coverage import CoverageAnalyzer
+from exq.profiler.dense_profile import DenseProfile
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -41,14 +42,6 @@ def parse_eval_log(path: str | Path) -> dict[str, dict[str, dict[str, float]]]:
         model_id: {p: dict(v) for p, v in precisions.items()}
         for model_id, precisions in records.items()
     }
-
-
-def compute_recovery(fp16: float, rpgo: float, int4: float) -> float:
-    """Return INT4 degradation recovery percentage."""
-    denom = int4 - fp16
-    if denom <= 0:
-        return 0.0
-    return (int4 - rpgo) / denom * 100.0
 
 
 def _safe_load_json(path: Path) -> dict:
@@ -137,7 +130,7 @@ DENSE_MODELS = {
 
 def print_compile_table(compile_stats: dict) -> None:
     print("\n" + "=" * 70)
-    print("Table 1: R-PGO Compilation Performance")
+    print("Table 1: ExQ Compilation Performance")
     print("=" * 70)
     print(f"{'Model':<28} {'Type':<6} {'Nodes':>7} {'Edges':>9} {'Time':>8}")
     print("-" * 62)
@@ -247,7 +240,7 @@ def print_quality_table(moe_records: dict, dense_records: dict) -> None:
     print("\n" + "=" * 70)
     print("Table 3: Quality Validation (WikiText2 PPL, lower=better)")
     print("=" * 70)
-    print(f"{'Model':<28} {'fp16':>8} {'R-PGO':>8} {'INT4':>8} {'Recovery':>10}")
+    print(f"{'Model':<28} {'fp16':>8} {'ExQ':>8} {'INT4':>8} {'Recovery':>10}")
     print("-" * 66)
 
     rows = [
@@ -281,7 +274,7 @@ def print_quality_table(moe_records: dict, dense_records: dict) -> None:
         )
 
     print()
-    print("R-PGO frequency-stratified quant recovers INT4 degradation in proportion")
+    print("ExQ frequency-stratified quant recovers INT4 degradation in proportion")
     print("to compiler's quant differentiation (Table 2). Break-even models correctly")
     print("identified at compile time.")
 
@@ -290,7 +283,7 @@ def print_quality_table(moe_records: dict, dense_records: dict) -> None:
 
 def print_latency_table() -> None:
     print("\n" + "=" * 70)
-    print("Table 4: Zero-Overhead Latency & Prefetch Execution")
+    print("Table 4: Prediction Overhead vs ExQ Static Schedule")
     print("=" * 70)
 
     lat_path = Path("results/latency_benchmark.json")
@@ -317,7 +310,7 @@ def print_latency_table() -> None:
         print("-" * 78)
         print(f"{'A: Baseline':<30} {batch_payload['baseline']['p50_ms']:>9.1f} {batch_payload['baseline']['p95_ms']:>9.1f} {batch_payload['baseline']['p99_ms']:>9.1f} {'—':>14}")
         print(f"{'B: Runtime predictor (MLP)':<30} {batch_payload['runtime_predictor']['p50_ms']:>9.1f} {batch_payload['runtime_predictor']['p95_ms']:>9.1f} {batch_payload['runtime_predictor']['p99_ms']:>9.1f} {pct:>+13.1f}%")
-        print(f"{'C: R-PGO static':<30} {batch_payload['rpgo_static']['p50_ms']:>9.1f} {batch_payload['rpgo_static']['p95_ms']:>9.1f} {batch_payload['rpgo_static']['p99_ms']:>9.1f} {'0.0%':>14}")
+        print(f"{'C: ExQ static':<30} {batch_payload['rpgo_static']['p50_ms']:>9.1f} {batch_payload['rpgo_static']['p95_ms']:>9.1f} {batch_payload['rpgo_static']['p99_ms']:>9.1f} {'0.0%':>14}")
     else:
         print(f"{'Condition':<30} {'TPOT':>10} {'Overhead':>12} {'% of baseline':>14}")
         print("-" * 68)
@@ -330,10 +323,10 @@ def print_latency_table() -> None:
             f"{'B: Runtime predictor (MLP)':<30} {predictor:>9.1f}ms "
             f"{overhead:>+11.1f}ms {pct:>+13.1f}%"
         )
-        print(f"{'C: R-PGO static':<30} {baseline:>9.1f}ms {'0.0ms':>12} {'0.0%':>14}")
+        print(f"{'C: ExQ static':<30} {baseline:>9.1f}ms {'~0.0ms':>12} {'~0.0%':>14}")
     print()
     print(f"Runtime predictor: +{overhead:.1f}ms/token ({pct:.1f}% overhead).")
-    print("R-PGO: 0ms — schedule compiled statically, no per-token cost.")
+    print("ExQ: no per-token prediction model; static prefetches have negligible CPU/GPU cost.")
 
     # Prefetch execution results
     prefetch_path = Path("results/prefetch_execution.json")
@@ -343,7 +336,7 @@ def print_latency_table() -> None:
         print(f"{'─'*68}")
         print(f"Prefetch Execution (expert offload simulation):")
         print(f"  On-demand loading:     +{pf['on_demand_tpot_ms'] - pf['all_gpu_tpot_ms']:.1f}ms/token overhead")
-        print(f"  R-PGO static prefetch: +{pf['prefetch_tpot_ms'] - pf['all_gpu_tpot_ms']:.1f}ms/token (overlapped)")
+        print(f"  ExQ static prefetch: +{pf['prefetch_tpot_ms'] - pf['all_gpu_tpot_ms']:.1f}ms/token (overlapped)")
         print(f"  Transfer overlap:      {pf['prefetch_overlap_ratio']:.0%} hidden by compute")
         print(f"  Prefetches executed:   {pf['prefetches_executed']} (async CUDA streams)")
         print("  Note: this is a controlled expert-offload simulation, not a full end-to-end")
@@ -363,7 +356,7 @@ def print_external_baseline_table() -> None:
         print("Model: Qwen/Qwen2.5-3B")
         print("Baseline: controlled in-process AWQ from the same base checkpoint")
         print()
-        print(f"{'Dataset':<12} {'fp16':>8} {'R-PGO':>8} {'AWQ':>8} {'RTN INT4':>10} {'R-PGO vs AWQ':>16}")
+        print(f"{'Dataset':<12} {'fp16':>8} {'ExQ':>8} {'AWQ':>8} {'RTN INT4':>10} {'ExQ vs AWQ':>16}")
         print("-" * 70)
         wt_fp16 = 7.8541
         wt_rpgo = 7.9170
@@ -393,7 +386,7 @@ def print_external_baseline_table() -> None:
     print(f"Model: {model_id}")
     print(f"External checkpoint: {ckpt}")
     print()
-    print(f"{'Dataset':<12} {'fp16':>8} {'R-PGO':>8} {provider:>8} {'RTN INT4':>10} {'R-PGO vs ' + provider:>16}")
+    print(f"{'Dataset':<12} {'fp16':>8} {'ExQ':>8} {provider:>8} {'RTN INT4':>10} {'ExQ vs ' + provider:>16}")
     print("-" * 70)
     for dataset in ("wikitext2", "c4"):
         row = data[dataset]
@@ -440,10 +433,10 @@ def print_zero_shot_and_kl_table() -> None:
     print("-" * 64)
     print(f"{'fp16':<18} {fp16['average_accuracy']:>9.4f} {'—':>10} {'—':>10} {'—':>10}")
     print(f"{'int4':<18} {int4['average_accuracy']:>9.4f} {kl_int4['mean']:>10.4f} {kl_int4['p99']:>10.4f} {kl_int4['max']:>10.4f}")
-    print(f"{'R-PGO dense':<18} {rpgo['average_accuracy']:>9.4f} {kl_rpgo['mean']:>10.4f} {kl_rpgo['p99']:>10.4f} {kl_rpgo['max']:>10.4f}")
+    print(f"{'ExQ dense':<18} {rpgo['average_accuracy']:>9.4f} {kl_rpgo['mean']:>10.4f} {kl_rpgo['p99']:>10.4f} {kl_rpgo['max']:>10.4f}")
     print(f"{'AWQ controlled':<18} {awq['average_accuracy']:>9.4f} {kl_awq['mean']:>10.4f} {kl_awq['p99']:>10.4f} {kl_awq['max']:>10.4f}")
     print()
-    print("Takeaway: R-PGO dense improves zero-shot accuracy over RTN int4 and")
+    print("Takeaway: ExQ dense improves zero-shot accuracy over RTN int4 and")
     print("dramatically lowers KL mean/p99 relative to both RTN int4 and controlled AWQ.")
 
 
@@ -466,17 +459,17 @@ def print_e2e_metrics_table() -> None:
     print("-" * 62)
     print(f"{'Baseline':<24} {data['baseline']['ttft_ms']['p50']:>9.1f}ms {data['baseline']['tpot_ms']['p50']:>9.1f}ms {data['baseline']['throughput_toks_per_s']['p50']:>11.1f}")
     print(f"{'Runtime predictor':<24} {data['runtime_predictor']['ttft_ms']['p50']:>9.1f}ms {data['runtime_predictor']['tpot_ms']['p50']:>9.1f}ms {data['runtime_predictor']['throughput_toks_per_s']['p50']:>11.1f}")
-    print(f"{'R-PGO compiled':<24} {data['rpgo_compiled']['ttft_ms']['p50']:>9.1f}ms {data['rpgo_compiled']['tpot_ms']['p50']:>9.1f}ms {data['rpgo_compiled']['throughput_toks_per_s']['p50']:>11.1f}")
+    print(f"{'ExQ compiled':<24} {data['exq_compiled']['ttft_ms']['p50']:>9.1f}ms {data['exq_compiled']['tpot_ms']['p50']:>9.1f}ms {data['exq_compiled']['throughput_toks_per_s']['p50']:>11.1f}")
     print()
     print("Takeaway: runtime prediction hurts end-to-end token latency and throughput;")
-    print("R-PGO moves that decision cost offline into compilation.")
+    print("ExQ moves that decision cost offline into compilation.")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="R-PGO: Render final paper result tables"
+        description="ExQ: Render final paper result tables"
     )
     parser.add_argument(
         "--log-path", default="results/eval_log.txt", help="MoE benchmark log"

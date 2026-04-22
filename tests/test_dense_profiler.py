@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from rpgo.profiler.attention_profiler import AttentionProfiler, _find_attention_layers
+from exq.profiler.attention_profiler import AttentionProfiler, _find_attention_layers
 
 
 class MockLlamaAttention(nn.Module):

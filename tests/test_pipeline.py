@@ -7,7 +7,7 @@ Tests both the manual Python graph builder and the Rust-side graph builder.
 import tempfile
 from pathlib import Path
 
-from rpgo._core import (
+from exq._core import (
     RoutingProfile,
     LayerProfile,
     RoutingGraph,
@@ -17,7 +17,7 @@ from rpgo._core import (
     py_build_routing_graph,
     py_graph_summary,
 )
-from rpgo.eval.coverage import CoverageAnalyzer
+from exq.eval.coverage import CoverageAnalyzer
 
 
 def make_realistic_profile():

@@ -1,8 +1,8 @@
 [package]
-name = "rpgo"
+name = "exq"
 version = "0.1.0"
 edition = "2021"
-description = "Routing-Profile-Guided Optimization: a compiler framework for MoE inference"
+description = "ExQ: Expert Quantization for MoE inference"
 license = "Apache-2.0"
 
 [lib]

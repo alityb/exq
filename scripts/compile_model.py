@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI: Run the R-PGO compilation pipeline.
+"""CLI: Run the ExQ compilation pipeline.
 
 Usage:
     python scripts/compile_model.py --profile routing_profile.json
@@ -11,7 +11,7 @@ import json
 import logging
 from pathlib import Path
 
-from rpgo._core import RoutingProfile
+from exq._core import RoutingProfile
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -26,7 +26,7 @@ def _infer_auto_params(profile: RoutingProfile) -> tuple[int, int]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="R-PGO: Compile model from routing profile")
+    parser = argparse.ArgumentParser(description="ExQ: Compile model from routing profile")
     parser.add_argument("--profile", type=str, required=True, help="Path to routing_profile.json")
     parser.add_argument("--output", type=str, default="compiled_artifact.json", help="Output path")
     parser.add_argument(
@@ -41,7 +41,7 @@ def main():
     parser.add_argument("--kernel-dir", type=str, default=None, help="Output dir for kernels")
     args = parser.parse_args()
 
-    from rpgo._core import (
+    from exq._core import (
         CompilerPipeline,
         py_build_routing_graph,
         py_graph_summary,
@@ -102,7 +102,7 @@ def main():
 
     # Optionally emit Triton kernels
     if args.emit_kernels:
-        from rpgo.codegen import emit_prefetch_kernels
+        from exq.codegen import emit_prefetch_kernels
 
         kernel_dir = args.kernel_dir or str(Path(args.output).with_suffix("")) + "_kernels/"
         kernel_path = emit_prefetch_kernels(

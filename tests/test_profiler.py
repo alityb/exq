@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import pytest
 
-from rpgo.profiler.routing_profiler import RoutingProfiler, _find_moe_layers
+from exq.profiler.routing_profiler import RoutingProfiler, _find_moe_layers
 
 
 # ---------------------------------------------------------------------------

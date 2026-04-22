@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Solve the R-PGO joint scheduler over a routing graph."""
+"""Solve the ExQ joint scheduler over a routing graph."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from collections import Counter
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="R-PGO joint scheduler (CP-SAT)")
+    parser = argparse.ArgumentParser(description="ExQ joint scheduler (CP-SAT)")
     parser.add_argument("--profile", required=True)
     parser.add_argument("--min-prefetch-prob", type=float, default=0.35)
     parser.add_argument("--memory-budget-units", type=int, default=None)
@@ -18,8 +18,8 @@ def main() -> None:
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
-    from rpgo._core import RoutingProfile, py_build_routing_graph
-    from rpgo.compiler import solve_joint_schedule
+    from exq._core import RoutingProfile, py_build_routing_graph
+    from exq.compiler import solve_joint_schedule
 
     profile = RoutingProfile.load(args.profile)
     graph = py_build_routing_graph(profile)

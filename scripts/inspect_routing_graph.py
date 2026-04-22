@@ -13,12 +13,12 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="R-PGO: Inspect routing graph")
+    parser = argparse.ArgumentParser(description="ExQ: Inspect routing graph")
     parser.add_argument("--profile", type=str, required=True, help="Path to routing_profile.json")
     parser.add_argument("--kernels", action="store_true", help="Show pseudo-kernel prefetch schedules")
     args = parser.parse_args()
 
-    from rpgo._core import (
+    from exq._core import (
         RoutingProfile,
         CompilerPipeline,
         py_build_routing_graph,

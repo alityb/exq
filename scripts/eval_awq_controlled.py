@@ -2,7 +2,7 @@
 """Run a controlled in-process AWQ baseline from the same base checkpoint.
 
 This script quantizes a base model with AutoAWQ in the current environment,
-then evaluates perplexity on the same benchmarks used for R-PGO. Unlike the
+then evaluates perplexity on the same benchmarks used for ExQ. Unlike the
 external-checkpoint comparison, this is a same-checkpoint baseline.
 """
 
@@ -40,7 +40,7 @@ def main() -> None:
     from awq import AutoAWQForCausalLM
     from transformers import AutoTokenizer
 
-    from rpgo.eval import compute_perplexity
+    from exq.eval import compute_perplexity
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tokenizer.pad_token is None and tokenizer.eos_token is not None:

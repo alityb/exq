@@ -5,9 +5,9 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from rpgo.compiler.dense_quant_planner import DenseQuantPlan, HeadQuantPlan
-from rpgo.eval.dense_quant_apply import ColumnMixedPrecisionLinear, HeadMixedPrecisionLinear, apply_dense_quant, build_uniform_dense_plan
-from rpgo.eval.modeling import apply_precision_to_model
+from exq.compiler.dense_quant_planner import DenseQuantPlan, HeadQuantPlan
+from exq.eval.dense_quant_apply import ColumnMixedPrecisionLinear, HeadMixedPrecisionLinear, apply_dense_quant, build_uniform_dense_plan
+from exq.eval.modeling import apply_precision_to_model
 
 
 class TinyAttention(nn.Module):

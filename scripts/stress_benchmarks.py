@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stress-test R-PGO benchmark stability and artifact determinism."""
+"""Stress-test ExQ benchmark stability and artifact determinism."""
 
 from __future__ import annotations
 
