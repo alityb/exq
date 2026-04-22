@@ -114,39 +114,55 @@ The Rust core handles the full compiler pipeline. Python handles model loading, 
 
 ## Results
 
-### Contribution 1 — Kernel speed (ExQ INT4 vs fp16, same model)
+### Kernel speed — ExQ INT4 vs SGLang INT4 (same weights, same precision)
 
-**Fair baseline:** our fp16 grouped GEMM kernel, same sorted-token dispatch, same hardware.
-The only difference is weight precision: fp16 (2 bytes/param) vs packed INT4 (0.5 bytes/param + scales).
+**The fair comparison:** both kernels receive the same RTN-packed INT4 weights
+(two values per byte, per-group fp16 scales). The only difference is the kernel
+implementation. SGLang uses its built-in `fused_experts_impl` with
+`use_int4_w4a16=True`. ExQ uses its own sorted-token grouped GEMM with
+on-chip dequantization. Both execute the full MoE forward pass
+(gate+up → SiLU → down → weighted combine).
 
-| Model | fp16 P50 | ExQ INT4 P50 | Δ |
+| Model | SGLang INT4 P50 | ExQ INT4 P50 | Δ |
 |---|---|---|---|
-| OLMoE-1B-7B (64 exp, top-2) | 1.173 ms | 0.774 ms | **−34%** |
-| Qwen3-30B-A3B (128 exp, top-8) | 2.044 ms | 1.112 ms | **−46%** |
+| OLMoE-1B-7B (64 exp, top-2) | 2.493 ms | 1.854 ms | **−26%** |
+| Qwen3-30B-A3B (128 exp, top-8) | 3.770 ms | 3.090 ms | **−18%** |
 
-A10G, batch=8, seqlen=64, 200-run P50. Gains are consistent across batch sizes
-(OLMoE: −34–36%; Qwen3: −45–51%). Source of speedup: weight HBM traffic cut
-by **3.88×** (OLMoE: 256 MB → 66 MB; Qwen3: 384 MB → 99 MB).
+A10G, batch=8, seqlen=64, 200-run P50. Batch sweep:
 
-This benchmark does not involve SGLang. It compares the two kernels directly.
+| Batch | OLMoE Δ | Qwen3 Δ |
+|---|---|---|
+| 1 | **−34%** | **−39%** |
+| 2 | **−33%** | **−34%** |
+| 4 | **−32%** | **−33%** |
+| 8 | −26% | −18% |
 
-### Contribution 2 — Quality (ExQ mixed-prec vs uniform INT4, same memory)
+Source of speedup: ExQ's kernel uses sorted-token dispatch which turns the
+per-expert GEMM into sequential HBM reads, improving utilization versus
+SGLang's gather-based approach. Weight bandwidth is identical (same INT4
+packing, 3.88× vs fp16).
 
-**Fair baseline:** uniform INT4 at the same total memory footprint.
-ExQ assigns BF16/INT8 to hot experts and INT4 to cold experts; the memory budget is identical.
+### Quality — ExQ mixed-prec vs uniform INT4 (same memory)
 
-Recovery measures what fraction of the fp16→INT4 quality gap ExQ eliminates:
+**The fair comparison:** uniform INT4 at the same total memory footprint.
+ExQ assigns BF16/INT8 to frequently-activated experts and INT4 to the rest;
+the memory budget is identical.
+
+Recovery = fraction of the fp16→INT4 quality gap that ExQ eliminates:
 
 | Model | Type | Recovery | quant_diff | Notes |
 |---|---|---|---|---|
 | OLMoE-1B-7B | MoE | **53.9%** | 0.429 | Strong routing concentration |
 | Qwen2.5-3B | Dense | **66.8%** | 0.377 | |
 | Qwen2.5-1.5B | Dense | **62.2%** | 0.345 | |
-| Qwen1.5-MoE | MoE | 1.4% | 0.010 | Near-uniform routing; no headroom |
+| Qwen1.5-MoE | MoE | 1.4% | 0.010 | Near-uniform routing |
 | DeepSeek-V2-Lite | MoE | −0.3% | 0.003 | Near-uniform routing |
-| GLM-4.7-Flash | MoE | −14.2% | 0.119 | INT4 already close to fp16 baseline |
+| GLM-4.7-Flash | MoE | −14.2% | 0.119 | INT4 already close to fp16 |
 
-`quant_diff` = fraction of experts at INT8 or BF16. Recovery only materialises when routing is concentrated enough to assign meaningful higher-precision headroom to hot experts. Models with near-uniform routing (low `quant_diff`) see little or no gain.
+`quant_diff` = fraction of experts at INT8 or BF16. Recovery requires routing
+concentration: models where a small subset of experts handles most tokens can
+meaningfully assign higher precision to those experts. Near-uniform routing
+leaves no headroom.
 
 Output distribution (KL divergence vs fp16, Qwen2.5-3B, WikiText2):
 
@@ -158,32 +174,6 @@ Output distribution (KL divergence vs fp16, Qwen2.5-3B, WikiText2):
 
 ExQ mean KL is **2.3× lower than uniform INT4** and **6.9× lower than AWQ**
 at the same memory budget.
-
-### System-level — ExQ via SGLang vs SGLang fp16
-
-This is not a fair speed comparison (INT4 weights vs fp16 weights). It answers
-a different question: *what does the full system look like if you deploy ExQ
-instead of the default fp16 SGLang setup?* You get lower latency at the cost of
-INT4 weight precision; ExQ's mixed-precision assignment partially recovers that
-quality cost (see Contribution 2 above).
-
-| Model | SGLang fp16 | ExQ INT4 (via SGLang) | Δ |
-|---|---|---|---|
-| OLMoE-1B-7B | 2.393 ms | 1.919 ms | −19.8% |
-| Qwen3-30B-A3B | 3.589 ms | 3.101 ms | −13.6% |
-
-A10G, batch=8, seqlen=64. The gain is smaller than the direct kernel benchmark
-because SGLang's shared dispatch overhead (token sorting, boundary computation)
-is the same for both systems and is not affected by weight precision.
-
-Batch sweep (SGLang integration, best operating points in **bold**):
-
-| Batch | OLMoE Δ | Qwen3 Δ |
-|---|---|---|
-| 1 | −5.9% | −19.3% |
-| 2 | **−26.7%** | −17.0% |
-| 4 | **−25.3%** | **−26.5%** |
-| 8 | −20.5% | −13.2% |
 
 ### Compile time
 
