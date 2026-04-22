@@ -1,60 +1,31 @@
 """
 ExQ SGLang integration.
 
-Patches SGLang's UnquantizedFusedMoEMethod to dispatch expert GEMMs
-through ExQ's INT4 Triton kernel using a compiled artifact.
+Patches SGLang's UnquantizedFusedMoEMethod.forward_cuda to dispatch
+through ExQ's INT4 CUDA+Triton kernel pipeline.
 
-The integration is a targeted patch of one method:
-  UnquantizedFusedMoEMethod.forward_cuda
-
-SGLang's architecture (v0.5.x):
-  FusedMoE.forward_impl
-    └─ dispatcher.dispatch()           # sort tokens by expert
-    └─ run_moe_core()
-         └─ quant_method.apply()
-              └─ forward_cuda()        # ← ExQ patches here
-                   └─ fused_experts()  # SGLang's Triton kernel
-
-The patch replaces the two GEMMs (gate_up + down) with ExQ's
-INT4 kernel when the layer is covered by the artifact. Layers not
-in the artifact fall through to SGLang's default kernel.
-
-Weight layout in SGLang:
-  w13_weight: [n_experts, 2*intermediate, hidden]  — gate+up fused
-  w2_weight:  [n_experts, hidden, intermediate]    — down projection
-
-ExQ kernel interface:
-  moe_int4_forward(hidden, packed_w1, scales_w1, router_indices, n_experts)
-  → [n_tokens * top_k, intermediate]  (gate+up result, before activation)
+The patch replaces the two GEMMs (gate_up + down) for layers covered
+by the artifact. Layers not in the artifact fall through to SGLang's
+default kernel.
 
 Usage:
     from exq.runtime.sglang_backend import patch_sglang
     backend = patch_sglang("artifacts/qwen3-30b-a3b.json")
     # then launch SGLang server normally
-
-Notes on what this is NOT:
-  - It does not register a new MoeRunnerBackend enum value (closed enum)
-  - It does not touch SGLang's dispatcher, token sorter, or router
-  - It does not change weight loading (weights stay in SGLang's format)
-    until the first forward pass, at which point ExQ packs them once
-    and caches the packed tensors
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from pathlib import Path
-from typing import Optional
 
 import torch
 
 logger = logging.getLogger(__name__)
 
 # ── Per-layer INT4 weight cache ───────────────────────────────────────────────
-# SGLang stores weights as fp16 w13_weight and w2_weight on the layer object.
-# We pack them to INT4 once on first call and cache the result.
-# Key: id(layer) → {"w1_packed", "w1_scales", "w2_packed", "w2_scales"}
+# Packed on first call, reused every subsequent call.
+# Key: id(layer) → dict with packed weights + metadata
 _exq_packed_cache: dict[int, dict] = {}
 
 
@@ -67,39 +38,31 @@ def _get_or_pack(layer) -> dict:
     from exq.kernels.moe_int4_kernel import pack_experts_int4
 
     t0 = time.perf_counter()
-    w1 = layer.w13_weight  # [n_experts, 2*inter, hidden]
-    w2 = layer.w2_weight   # [n_experts, hidden,  inter]
-
-    # Ensure fp16 for packing (SGLang may load in bf16)
-    if w1.dtype != torch.float16:
-        w1 = w1.to(torch.float16)
-    if w2.dtype != torch.float16:
-        w2 = w2.to(torch.float16)
+    w1 = layer.w13_weight.to(torch.float16)  # [n_experts, 2*inter, hidden]
+    w2 = layer.w2_weight.to(torch.float16)   # [n_experts, hidden, inter]
 
     w1_packed, w1_scales = pack_experts_int4(w1, group_size=128)
     w2_packed, w2_scales = pack_experts_int4(w2, group_size=128)
 
     cache = {
-        "w1_packed": w1_packed,
-        "w1_scales": w1_scales,
-        "w2_packed": w2_packed,
-        "w2_scales": w2_scales,
+        "w1_packed": w1_packed, "w1_scales": w1_scales,
+        "w2_packed": w2_packed, "w2_scales": w2_scales,
         "n_experts": w1.shape[0],
         "inter2":    w1.shape[1],   # 2 * intermediate_size
         "hidden":    w1.shape[2],
+        "flat_router_cache": None,  # populated on first forward
     }
     _exq_packed_cache[key] = cache
-    dt = (time.perf_counter() - t0) * 1000
     logger.info(
-        f"ExQ: packed layer {getattr(layer, 'layer_id', '?')} INT4 "
-        f"w1={list(w1.shape)} w2={list(w2.shape)} in {dt:.1f}ms"
+        f"ExQ: packed layer {getattr(layer, 'layer_id', '?')} "
+        f"in {(time.perf_counter()-t0)*1000:.1f}ms"
     )
     return cache
 
 
-# ── The patched forward_cuda ──────────────────────────────────────────────────
+# ── Patched forward_cuda ──────────────────────────────────────────────────────
 
-def _rpgo_forward_cuda(
+def _exq_forward_cuda(
     self_method,
     layer,
     dispatch_output,
@@ -108,204 +71,155 @@ def _rpgo_forward_cuda(
 ):
     """
     Replacement for UnquantizedFusedMoEMethod.forward_cuda.
-
-    Runs ExQ's INT4 kernel for layers covered by the artifact.
-    Falls through to SGLang's default kernel for all other layers.
+    Uses ExQ's CUDA dispatch + Triton INT4 GEMMs.
+    Falls through to SGLang's default kernel for uncovered layers.
     """
+    import triton
     from sglang.srt.layers.moe.token_dispatcher.standard import StandardCombineInput
-    from sgl_kernel import silu_and_mul
+    from sgl_kernel import moe_align_block_size as sgl_align, silu_and_mul
+    import exq_dispatch_cuda
+    from exq.kernels.moe_int4_kernel import _moe_gemm_int4_kernel
 
     layer_id = getattr(layer, "layer_id", None)
-
-    # Fall through to SGLang default if layer is not in artifact
     if layer_id is None or layer_id >= _artifact_n_layers:
         return _original_forward_cuda(self_method, layer, dispatch_output)
 
-    hidden_states = dispatch_output.hidden_states       # [n_tokens, hidden]
+    hidden_states = dispatch_output.hidden_states    # [n_tokens, hidden]
     topk_output   = dispatch_output.topk_output
-    topk_weights  = topk_output.topk_weights            # [n_tokens, top_k]
-    topk_ids      = topk_output.topk_ids                # [n_tokens, top_k]
+    topk_weights  = topk_output.topk_weights          # [n_tokens, top_k]
+    topk_ids      = topk_output.topk_ids              # [n_tokens, top_k]
 
-    from exq.kernels.moe_int4_kernel import moe_int4_forward
-
-    cache = _get_or_pack(layer)
+    cache     = _get_or_pack(layer)
     n_experts = cache["n_experts"]
-    inter2    = cache["inter2"]     # 2 * intermediate_size
+    inter2    = cache["inter2"]
+    hidden    = cache["hidden"]
+    n_tokens  = hidden_states.shape[0]
+    top_k     = topk_ids.shape[1]
+    n_active  = n_tokens * top_k
+    BLOCK_M   = 16
 
-    # Compute the sorted expert assignment order (needed for both GEMMs and
-    # for building the correct GEMM2 router_indices).
-    flat_ids   = topk_ids.reshape(-1).long()           # [n_active]
-    sort_order = torch.argsort(flat_ids, stable=True)  # [n_active]
-    sorted_expert_ids = flat_ids[sort_order]           # [n_active], sorted
+    # ── Dispatch: sgl_align (20μs) + build_ends_from_slots (48μs) ────────────
+    max_padded = n_active + (n_experts + 1) * (BLOCK_M - 1)
+    sorted_ids  = torch.empty(max_padded, dtype=torch.int32, device="cuda")
+    expert_blk  = torch.empty(triton.cdiv(max_padded, BLOCK_M), dtype=torch.int32, device="cuda")
+    ntpp        = torch.empty(1, dtype=torch.int32, device="cuda")
+    cumsum_buf  = torch.empty(n_experts + 2, dtype=torch.int32, device="cuda")
 
-    # ── GEMM 1: gate + up projection (w13) ───────────────────────────────────
-    # Output: [n_tokens * top_k, 2*intermediate]
-    gate_up = moe_int4_forward(
-        hidden_states=hidden_states,
-        expert_packed=cache["w1_packed"],
-        expert_scales=cache["w1_scales"],
-        router_indices=topk_ids,          # [n_tokens, top_k]
-        n_experts=n_experts,
-        group_size=128,
+    sgl_align(topk_ids, n_experts + 1, BLOCK_M,
+               sorted_ids, expert_blk, ntpp, cumsum_buf, True)
+
+    flat_router = topk_ids.reshape(-1).int().contiguous()
+    sort_order  = torch.empty(n_active, dtype=torch.int64, device="cuda")
+    expert_ends = torch.zeros(n_experts + 1, dtype=torch.int32, device="cuda")
+    exq_dispatch_cuda.build_ends_from_slots(
+        sorted_ids, flat_router, expert_ends, sort_order, n_active, n_experts)
+
+    # ── Gather ────────────────────────────────────────────────────────────────
+    sorted_hidden = torch.empty(n_active, hidden, dtype=torch.float16, device="cuda")
+    exq_dispatch_cuda.gather_hidden(hidden_states, sort_order, sorted_hidden, top_k)
+
+    max_tok = int((expert_ends[1:] - expert_ends[:-1]).max().item())
+    nm      = max((max_tok + 64 - 1) // 64, 1)
+    BN, BK  = 128, 32
+
+    # ── GEMM1: gate+up ────────────────────────────────────────────────────────
+    gate_up = torch.zeros(n_active, inter2, dtype=torch.float16, device="cuda")
+    _moe_gemm_int4_kernel[(n_experts, nm, (inter2 + BN - 1) // BN)](
+        sorted_hidden, cache["w1_packed"], cache["w1_scales"], gate_up, expert_ends,
+        N=inter2, K=hidden,
+        stride_am=sorted_hidden.stride(0),
+        stride_be=cache["w1_packed"].stride(0), stride_bn=cache["w1_packed"].stride(1),
+        stride_se=cache["w1_scales"].stride(0), stride_sn=cache["w1_scales"].stride(1),
+        stride_cm=gate_up.stride(0),
+        BLOCK_M=64, BLOCK_N=BN, BLOCK_K=BK, GROUP_SIZE=128,
     )
 
-    # ── Activation: SiLU + elementwise mul (SwiGLU) ──────────────────────────
-    n_active = gate_up.shape[0]
-    intermediate = torch.empty(
-        (n_active, inter2 // 2),
-        dtype=hidden_states.dtype,
-        device=hidden_states.device,
+    # ── SiLU+mul ──────────────────────────────────────────────────────────────
+    inter = inter2 // 2
+    mid = torch.empty(n_active, inter, dtype=torch.float16, device="cuda")
+    silu_and_mul(gate_up, mid)
+
+    # ── GEMM2: down ───────────────────────────────────────────────────────────
+    down_out = torch.zeros(n_active, hidden, dtype=torch.float16, device="cuda")
+    _moe_gemm_int4_kernel[(n_experts, nm, (hidden + BN - 1) // BN)](
+        mid, cache["w2_packed"], cache["w2_scales"], down_out, expert_ends,
+        N=hidden, K=inter,
+        stride_am=mid.stride(0),
+        stride_be=cache["w2_packed"].stride(0), stride_bn=cache["w2_packed"].stride(1),
+        stride_se=cache["w2_scales"].stride(0), stride_sn=cache["w2_scales"].stride(1),
+        stride_cm=down_out.stride(0),
+        BLOCK_M=64, BLOCK_N=BN, BLOCK_K=BK, GROUP_SIZE=128,
     )
-    silu_and_mul(gate_up, intermediate)
 
-    # ── GEMM 2: down projection (w2) ─────────────────────────────────────────
-    # intermediate: [n_active, inter] — one row per (token, expert) slot,
-    # already in sorted-expert order (same order moe_int4_forward uses).
-    # w2_weight: [n_experts, hidden, inter] → packed [n_experts, hidden, inter//2]
-    #
-    # For GEMM2, each intermediate row belongs to exactly ONE expert.
-    # We pass sorted_expert_ids as a [n_active, 1] router_indices tensor so
-    # moe_int4_forward dispatches each row to its correct expert.
-    r_idx_down = sorted_expert_ids.unsqueeze(1)   # [n_active, 1]
-    down_out = moe_int4_forward(
-        hidden_states=intermediate,
-        expert_packed=cache["w2_packed"],
-        expert_scales=cache["w2_scales"],
-        router_indices=r_idx_down,       # [n_active, 1] — 1 expert per slot
-        n_experts=n_experts,
-        group_size=128,
-    )
-    # down_out: [n_active, hidden], in sorted-expert order
+    # ── Combine ───────────────────────────────────────────────────────────────
+    result = torch.empty(n_tokens, hidden, dtype=torch.float16, device="cuda")
+    exq_dispatch_cuda.combine(down_out, sort_order, topk_weights, result)
 
-    # ── Combine: weighted sum over top_k ─────────────────────────────────────
-    # down_out: [n_active, hidden], in sorted-expert order.
-    # We need to unsort back to [n_tokens, top_k, hidden] order then
-    # apply topk_weights and sum over top_k.
-    n_tokens = hidden_states.shape[0]
-    top_k    = topk_ids.shape[1]
-    hidden   = cache["hidden"]
-
-    # unsort: map sorted positions back to flat (token, k) positions
-    # sort_order[j] = original flat index i, so unsort_order[i] = j
-    unsort_ord = torch.argsort(sort_order, stable=True)
-
-    unsorted = down_out[unsort_ord].view(n_tokens, top_k, hidden)
-    weights  = topk_weights.unsqueeze(-1).to(unsorted.dtype)
-    out      = (unsorted * weights).sum(dim=1)
-
-    return StandardCombineInput(hidden_states=out)
+    return StandardCombineInput(hidden_states=result)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 class ExQSGLangBackend:
-    """
-    ExQ backend for SGLang MoE.
-
-    Holds the artifact metadata and manages the per-layer weight cache.
-    Created by patch_sglang() and stored as a module-level singleton so
-    the patched forward_cuda can reference it.
-    """
+    """Holds artifact metadata and the per-layer weight cache."""
 
     def __init__(self, artifact_path: str):
         import json
-        with open(artifact_path, encoding="utf-8") as f:
-            artifact = json.load(f)
-
+        artifact = json.load(open(artifact_path, encoding="utf-8"))
         qa = artifact.get("quant_assignments", {})
         layer_ids = {int(k.split(":")[0]) for k in qa}
-        self.n_layers     = max(layer_ids) + 1 if layer_ids else 0
-        self.artifact     = artifact
+        self.n_layers      = max(layer_ids) + 1 if layer_ids else 0
         self.artifact_path = artifact_path
-
-        logger.info(
-            f"ExQ SGLang backend: {self.n_layers} layers in artifact "
-            f"({len(qa)} expert assignments)"
-        )
+        logger.info(f"ExQ SGLang backend: {self.n_layers} layers ({len(qa)} assignments)")
 
     def clear_cache(self):
-        """Clear packed weight cache (e.g., after weight updates)."""
         _exq_packed_cache.clear()
-        logger.info("ExQ: packed weight cache cleared")
 
     def cache_stats(self) -> dict:
-        return {
-            "n_layers_cached": len(_exq_packed_cache),
-            "n_layers_in_artifact": self.n_layers,
-        }
+        return {"n_layers_cached": len(_exq_packed_cache),
+                "n_layers_in_artifact": self.n_layers}
 
 
 def patch_sglang(artifact_path: str) -> ExQSGLangBackend:
     """
     Patch SGLang's MoE forward to use ExQ's INT4 kernel.
 
-    Replaces UnquantizedFusedMoEMethod.forward_cuda with a version
-    that dispatches through ExQ's packed INT4 Triton kernel for
-    layers covered by the artifact.
-
-    Args:
-        artifact_path: Path to compiled ExQ artifact JSON.
-
-    Returns:
-        ExQSGLangBackend instance (holds artifact metadata, weight cache).
-
-    Raises:
-        ImportError: if SGLang is not installed.
-        RuntimeError: if SGLang's API doesn't match expected structure.
+    Replaces UnquantizedFusedMoEMethod.forward_cuda for layers covered
+    by the artifact. All other layers fall through to SGLang's default.
     """
     try:
         from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod
     except ImportError as exc:
-        raise ImportError(
-            "SGLang not installed. Install with: pip install sglang"
-        ) from exc
+        raise ImportError("SGLang not installed: pip install sglang") from exc
 
     backend = ExQSGLangBackend(artifact_path)
 
-    # Guard against double-patching
     if getattr(UnquantizedFusedMoEMethod, "_exq_patched", False):
-        logger.warning("ExQ: SGLang already patched, re-patching with new artifact")
+        logger.warning("ExQ: re-patching SGLang (cache cleared)")
         _exq_packed_cache.clear()
 
-    original_forward_cuda = UnquantizedFusedMoEMethod.forward_cuda
-
-    # Capture backend in closure
+    original = UnquantizedFusedMoEMethod.forward_cuda
     n_layers = backend.n_layers
 
-    def patched_forward_cuda(self, layer, dispatch_output):
-        # `self` is the UnquantizedFusedMoEMethod instance (bound automatically)
-        return _rpgo_forward_cuda(
-            self,
-            layer,
-            dispatch_output,
-            original_forward_cuda,
-            n_layers,
-        )
+    def patched(self, layer, dispatch_output):
+        return _exq_forward_cuda(self, layer, dispatch_output, original, n_layers)
 
-    UnquantizedFusedMoEMethod.forward_cuda = patched_forward_cuda
+    UnquantizedFusedMoEMethod.forward_cuda = patched
     UnquantizedFusedMoEMethod._exq_patched = True
-
-    logger.info(
-        f"ExQ: patched SGLang UnquantizedFusedMoEMethod.forward_cuda "
-        f"(artifact covers {n_layers} layers)"
-    )
+    logger.info(f"ExQ: patched SGLang ({n_layers} layers covered)")
     return backend
 
 
 def unpatch_sglang():
-    """Restore SGLang's original forward_cuda (for testing)."""
+    """Restore SGLang's original forward_cuda."""
     try:
         from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod
     except ImportError:
         return
-
     if not getattr(UnquantizedFusedMoEMethod, "_exq_patched", False):
         return
-
-    # The original is captured in the closure; we can't easily restore it
-    # from outside. Instead, re-import to get a fresh class.
     import importlib
     import sglang.srt.layers.quantization.unquant as mod
     importlib.reload(mod)
     _exq_packed_cache.clear()
-    logger.info("ExQ: SGLang patch removed (module reloaded)")
+    logger.info("ExQ: SGLang patch removed")
