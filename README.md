@@ -120,8 +120,43 @@ The Rust core handles the full compiler pipeline. Python handles model loading, 
 weights (uint8, two values per byte, group_size=128 per-group fp16 scales).
 SGLang uses `fused_experts_impl` with `use_int4_w4a16=True, block_shape=[0,128]`,
 dispatching to its `fused_moe_kernel_gptq_awq` Triton kernel.
-ExQ uses a CUDA dispatch extension (`exq_dispatch_cuda`) + two Triton GEMMs.
+ExQ uses a CUDA dispatch extension + two Triton GEMMs:
+- `sgl_kernel.moe_align_block_size` (20 μs) — same kernel SGLang uses internally
+- `exq_dispatch_cuda.build_ends_from_slots` (48 μs) — builds expert boundary array
+- Two Triton INT4 GEMMs with on-chip dequantization + CUDA combine
+
 Outputs agree to <0.4% relative error (same RTN-quantized weights).
+
+**Cache effects:** INT4 weights are 198 MB (OLMoE) and 297 MB (Qwen3) vs 6 MB
+of L2 cache — weights always load from HBM. Warm vs cold cache differs ≤0.8 pp.
+
+**Full production sweep — decode regime (1 token per request):**
+
+| Batch | OLMoE SGLang | OLMoE ExQ | OLMoE Δ | Qwen3 SGLang | Qwen3 ExQ | Qwen3 Δ |
+|---|---|---|---|---|---|---|
+| 1 | 0.322 ms | 0.407 ms | −26% | 0.420 ms | 0.453 ms | −8% |
+| 4 | 0.342 ms | 0.472 ms | −38% | 0.544 ms | 0.591 ms | −9% |
+| 8 | 0.434 ms | 0.482 ms | −11% | 0.838 ms | **0.803 ms** | **+4%** |
+| 16 | 0.579 ms | 0.608 ms | −5% | 1.127 ms | **1.038 ms** | **+8%** |
+| 32 | 0.840 ms | **0.801 ms** | **+5%** | 1.508 ms | **1.335 ms** | **+12%** |
+| 64 | 1.121 ms | **1.065 ms** | **+5%** | 1.743 ms | **1.585 ms** | **+9%** |
+| 128 | 1.891 ms | **1.181 ms** | **+38%** | 1.790 ms | **1.688 ms** | **+6%** |
+| 256 | 1.950 ms | **1.262 ms** | **+35%** | 2.864 ms | **1.922 ms** | **+33%** |
+| 512 | 1.980 ms | **1.402 ms** | **+29%** | 2.928 ms | **2.422 ms** | **+17%** |
+
+A10G, seqlen=1 (pure decode), 300-run P50.
+
+**ExQ wins at batch≥32 for OLMoE and batch≥8 for Qwen3.**
+
+ExQ still loses at small batch sizes for OLMoE (batch 1–16) because SGLang's
+kernel fuses gate+up+SiLU+down into one Triton kernel launch; ExQ uses two
+separate kernel launches. At very small token counts, the per-launch overhead
+exceeds the sorted-access benefit.
+
+**Cross-over point** is determined by `avg_tokens_per_expert`:
+- OLMoE (top-2/64): cross-over at ~1 token/expert (batch≥32)
+- Qwen3 (top-8/128): cross-over at ~0.5 tokens/expert (batch≥8)
+
 
 **Cache effects:** INT4 weights are 198 MB (OLMoE) and 297 MB (Qwen3) vs 6 MB
 of L2 cache on the A10G — weights are 33–50× larger than L2 and always load
