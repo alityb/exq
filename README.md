@@ -120,46 +120,46 @@ The Rust core handles the full compiler pipeline. Python handles model loading, 
 weights (uint8, two values per byte, group_size=128 per-group fp16 scales).
 SGLang uses `fused_experts_impl` with `use_int4_w4a16=True, block_shape=[0,128]`,
 dispatching to its `fused_moe_kernel_gptq_awq` Triton kernel.
-ExQ uses `moe_int4_full_forward`: sorts tokens once, runs gate+up → SiLU → down
-in two Triton kernel launches sharing the same sort order, then combines.
+ExQ uses a CUDA dispatch extension (`exq_dispatch_cuda`) + two Triton GEMMs.
 Outputs agree to <0.4% relative error (same RTN-quantized weights).
 
 **Cache effects:** INT4 weights are 198 MB (OLMoE) and 297 MB (Qwen3) vs 6 MB
 of L2 cache on the A10G — weights are 33–50× larger than L2 and always load
-from HBM regardless of cache state. Warm-cache vs cold-cache (L2 flushed before
-every call) differs by at most 0.8 pp across all configurations. Cache state
-does not affect the comparison.
+from HBM. Warm vs cold cache (L2 flushed before every call) differs by ≤0.8 pp.
 
 **Full production sweep — decode regime (1 token per request):**
 
 | Batch | OLMoE SGLang | OLMoE ExQ | OLMoE Δ | Qwen3 SGLang | Qwen3 ExQ | Qwen3 Δ |
 |---|---|---|---|---|---|---|
-| 1 | 0.334 ms | 0.588 ms | −76% | 0.421 ms | 0.625 ms | −49% |
-| 8 | 0.421 ms | 0.645 ms | −53% | 0.863 ms | 0.982 ms | −14% |
-| 16 | 0.624 ms | 0.839 ms | −35% | 1.242 ms | 1.289 ms | −4% |
-| 32 | 0.787 ms | 0.977 ms | −24% | 1.528 ms | 1.541 ms | ~0% |
-| 64 | 1.062 ms | 1.183 ms | −11% | 1.715 ms | 1.735 ms | −1% |
-| **128** | 1.893 ms | **1.355 ms** | **+28%** | 1.799 ms | 1.871 ms | −4% |
-| **256** | 1.951 ms | **1.433 ms** | **+27%** | 2.868 ms | **2.150 ms** | **+25%** |
-| **512** | 1.983 ms | **1.578 ms** | **+20%** | 2.934 ms | **2.696 ms** | **+8%** |
+| 1 | 0.329 ms | 0.435 ms | −32% | 0.415 ms | 0.469 ms | −13% |
+| 4 | 0.342 ms | 0.491 ms | −44% | 0.569 ms | 0.616 ms | −8% |
+| 8 | 0.414 ms | 0.494 ms | −19% | 0.855 ms | **0.823 ms** | **+4%** |
+| 16 | 0.619 ms | 0.690 ms | −11% | 1.232 ms | **1.130 ms** | **+8%** |
+| 32 | 0.781 ms | 0.818 ms | −5% | 1.520 ms | **1.386 ms** | **+9%** |
+| 64 | 1.053 ms | **1.028 ms** | **+2%** | 1.709 ms | **1.580 ms** | **+8%** |
+| 128 | 1.887 ms | **1.200 ms** | **+36%** | 1.798 ms | **1.707 ms** | **+5%** |
+| 256 | 1.949 ms | **1.280 ms** | **+34%** | 2.864 ms | **1.942 ms** | **+32%** |
+| 512 | 1.978 ms | **1.419 ms** | **+28%** | 2.929 ms | **2.441 ms** | **+17%** |
 
 A10G, seqlen=1 (pure decode), 300-run P50.
 
-**ExQ wins at batch≥128 for OLMoE and batch≥256 for Qwen3.** At these batch
-sizes, ExQ's sorted-token dispatch pays off: tokens are grouped by expert before
-the GEMM, turning scattered HBM reads into sequential accesses.
+**ExQ wins at batch≥64 for OLMoE and batch≥8 for Qwen3.**
 
-**SGLang wins at small batches.** ExQ's Python dispatch (argsort + bincount +
-cumsum, ~0.27 ms) is not amortised over enough compute at low token counts.
-SGLang handles dispatch in C++ with no Python boundary.
+The implementation uses three CUDA kernels:
+- `exq_dispatch`: CUB radix sort + atomicAdd histogram + CUB prefix sum — 46 μs (was 278 μs in Python)
+- `exq_gather_hidden`: vectorised float4 gather — 12 μs
+- `exq_combine`: scatter-add with fp32 accumulation — 27 μs
 
-**The SGLang cliff at OLMoE batch=128** (1.06→1.89 ms, nearly 2×) is a kernel
-config boundary where SGLang's autotuner selects a different block configuration
-— ExQ's sorted dispatch avoids this cliff entirely.
+**Where ExQ still loses (small batches for OLMoE):** SGLang's
+`fused_moe_kernel_gptq_awq` fuses gate+up+SiLU+down into a single Triton
+kernel, visiting the weight matrices once. ExQ uses two separate kernel
+launches. At very small token counts (batch 1–32 for OLMoE) the two-launch
+overhead exceeds the sorted-access benefit. Eliminating this would require
+a CUDA-native fused gate+up+SiLU+down kernel.
 
 **Cross-over point** is determined by `avg_tokens_per_expert`:
-- OLMoE (top-2/64): cross-over at ~4 tokens/expert (batch≥128)
-- Qwen3 (top-8/128): cross-over at ~16 tokens/expert (batch≥256)
+- OLMoE (top-2/64): cross-over at ~2 tokens/expert (batch≥64)
+- Qwen3 (top-8/128): cross-over at ~0.5 tokens/expert (batch≥8)
 
 ### Quality — ExQ mixed-prec vs uniform INT4 (same memory)
 
