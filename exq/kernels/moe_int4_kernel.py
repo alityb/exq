@@ -240,7 +240,7 @@ def _moe_gemm_int4_kernel(
     tl.store(c_ptrs, acc.to(tl.float16), mask=mask_c)
 
 
-# ─── Python wrapper ───────────────────────────────────────────────────────────
+# ─── Python wrappers ──────────────────────────────────────────────────────────
 
 def moe_int4_forward(
     hidden_states: torch.Tensor,     # [n_tokens, K]   fp16
@@ -251,23 +251,16 @@ def moe_int4_forward(
     group_size: int = 128,
     block_m: int = 64,
     block_n: int = 128,   # wider N tiles amortise reduced B bandwidth
-    block_k: int = 32,    # 32 < 64: less dequant overhead per iteration
+    block_k: int = 32,
 ) -> torch.Tensor:
     """
-    MoE forward pass with real INT4 weight dequantization.
+    Single-GEMM INT4 forward (one projection only).
 
-    Weights are stored as packed uint8 (two INT4 per byte) with per-group
-    fp16 scales. The kernel unpacks and dequantizes on-chip during the GEMM,
-    loading 4× fewer weight bytes than fp16.
-
-    Args:
-        hidden_states:  [n_tokens, K]          fp16 activations
-        expert_packed:  [n_experts, N, K//2]   uint8 packed weights
-        expert_scales:  [n_experts, N, K//128] fp16 per-group scales
-        router_indices: [n_tokens, top_k]      int64 expert assignments
+    Used internally by moe_int4_full_forward. Sorts tokens by expert,
+    runs one INT4 GEMM with on-chip dequantization, returns sorted output.
 
     Returns:
-        output [n_tokens * top_k, N] fp16
+        output [n_tokens * top_k, N] fp16 in sorted-expert order
     """
     assert hidden_states.is_cuda
     assert expert_packed.is_cuda
@@ -342,3 +335,111 @@ def moe_int4_forward(
         GROUP_SIZE=group_size,
     )
     return output
+
+
+def moe_int4_full_forward(
+    hidden_states: torch.Tensor,       # [n_tokens, hidden_size]  fp16
+    w13_packed: torch.Tensor,          # [n_experts, 2*inter, hidden//2]  uint8
+    w13_scales: torch.Tensor,          # [n_experts, 2*inter, hidden//group_size]  fp16
+    w2_packed: torch.Tensor,           # [n_experts, hidden_size, inter//2]  uint8
+    w2_scales: torch.Tensor,           # [n_experts, hidden_size, inter//group_size]  fp16
+    router_indices: torch.Tensor,      # [n_tokens, top_k]
+    router_weights: torch.Tensor,      # [n_tokens, top_k]  fp16
+    n_experts: int,
+    group_size: int = 128,
+    block_m: int = 64,
+    block_n: int = 128,
+    block_k: int = 32,
+) -> torch.Tensor:
+    """
+    Full MoE forward: gate+up → SiLU → down → weighted combine.
+
+    Sorts tokens once and reuses the sort order for both GEMMs, eliminating
+    the duplicate argsort that the two-call approach requires. This is the
+    key optimization vs calling moe_int4_forward twice.
+
+    Args:
+        hidden_states:  [n_tokens, H]
+        w13_packed:     [n_experts, 2*inter, H//2]  gate+up packed INT4
+        w13_scales:     [n_experts, 2*inter, H//group_size]
+        w2_packed:      [n_experts, H, inter//2]    down packed INT4
+        w2_scales:      [n_experts, H, inter//group_size]
+        router_indices: [n_tokens, top_k]
+        router_weights: [n_tokens, top_k]
+
+    Returns:
+        output [n_tokens, H] fp16
+    """
+    from sgl_kernel import silu_and_mul
+
+    assert hidden_states.is_cuda and w13_packed.is_cuda
+
+    n_tokens, H = hidden_states.shape
+    _, inter2, _ = w13_packed.shape          # inter2 = 2 * intermediate_size
+    inter = inter2 // 2
+    top_k = router_indices.shape[1]
+    n_active = n_tokens * top_k
+
+    # ── Sort tokens once ─────────────────────────────────────────────────────
+    flat       = router_indices.reshape(-1).long()
+    sort_order = torch.argsort(flat, stable=True)
+    sorted_ids = flat[sort_order]
+    sorted_h   = hidden_states[(sort_order // top_k).long()]  # [n_active, H]
+
+    # Expert boundaries (shared between GEMM1 and GEMM2)
+    tc = torch.bincount(sorted_ids, minlength=n_experts)
+    ee = torch.zeros(n_experts + 1, dtype=torch.int32, device="cuda")
+    ee[1:] = tc.cumsum(0).int()
+    max_tok = int(tc.max().item()) if n_active > 0 else 1
+    unsort  = torch.argsort(sort_order, stable=True)
+
+    # Guard block sizes
+    n_groups_actual   = w13_scales.shape[2]
+    eff_group         = H // n_groups_actual
+    gs = min(group_size, eff_group)
+    bk = min(block_k, gs); bk = max(bk, 32); bk = bk if bk % 2 == 0 else bk - 1
+    nm = max((max_tok + block_m - 1) // block_m, 1)
+
+    # ── GEMM1: gate+up projection [n_active, 2*inter] ────────────────────────
+    out1 = torch.zeros(n_active, inter2, dtype=torch.float16, device="cuda")
+    nn1  = (inter2 + block_n - 1) // block_n
+    _moe_gemm_int4_kernel[(n_experts, nm, nn1)](
+        sorted_h, w13_packed, w13_scales, out1, ee,
+        N=inter2, K=H,
+        stride_am=sorted_h.stride(0),
+        stride_be=w13_packed.stride(0), stride_bn=w13_packed.stride(1),
+        stride_se=w13_scales.stride(0), stride_sn=w13_scales.stride(1),
+        stride_cm=out1.stride(0),
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=bk, GROUP_SIZE=gs,
+    )
+
+    # ── Activation: SiLU + elementwise mul (SwiGLU) ──────────────────────────
+    mid = torch.empty((n_active, inter), dtype=torch.float16, device="cuda")
+    silu_and_mul(out1, mid)
+
+    # ── GEMM2: down projection [n_active, H] ─────────────────────────────────
+    # mid is already in sorted-expert order — reuse ee and max_tok
+    n_groups_w2   = w2_scales.shape[2]
+    eff_group_w2  = inter // n_groups_w2
+    gs2 = min(group_size, eff_group_w2)
+    bk2 = min(block_k, gs2); bk2 = max(bk2, 32); bk2 = bk2 if bk2 % 2 == 0 else bk2 - 1
+    nm2 = max((max_tok + block_m - 1) // block_m, 1)
+
+    out2 = torch.zeros(n_active, H, dtype=torch.float16, device="cuda")
+    nn2  = (H + block_n - 1) // block_n
+    _moe_gemm_int4_kernel[(n_experts, nm2, nn2)](
+        mid, w2_packed, w2_scales, out2, ee,
+        N=H, K=inter,
+        stride_am=mid.stride(0),
+        stride_be=w2_packed.stride(0), stride_bn=w2_packed.stride(1),
+        stride_se=w2_scales.stride(0), stride_sn=w2_scales.stride(1),
+        stride_cm=out2.stride(0),
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=bk2, GROUP_SIZE=gs2,
+    )
+
+    # ── Combine: weighted sum over top_k ─────────────────────────────────────
+    return (
+        out2[unsort].view(n_tokens, top_k, H)
+        * router_weights.unsqueeze(-1).to(out2.dtype)
+    ).sum(dim=1)
+
