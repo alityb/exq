@@ -1,8 +1,11 @@
 # ExQ — Expert Quantization for MoE Inference
 
-ExQ is a compiler framework that profiles MoE expert routing behavior offline and uses those statistics to make every quantization, prefetching, and memory layout decision at compile time. The inference runtime executes a fixed schedule — no per-token predictor, no runtime overhead from prediction.
+ExQ is a compiler that reads offline routing statistics from a MoE model and uses them to make two decisions at compile time:
 
-The INT4 Triton kernel eliminates per-token prediction overhead. Static prefetch schedules (Pass C) currently use Python forward hooks (~2–3 ms/token dispatch cost); a native CUDA implementation would remove this.
+1. **Precision assignment** — frequently-activated experts keep BF16 or INT8; rarely-activated experts get INT4. This recovers quality lost by uniform INT4 quantization while staying at the same memory budget.
+2. **Kernel dispatch** — a Triton kernel that loads packed INT4 weights (two values per byte, per-group fp16 scales) and dequantizes on-chip. This reduces HBM traffic by 3.88× vs fp16 weights, which translates directly to lower decode latency on memory-bound hardware.
+
+These are separate contributions. The compiler assignment improves quality over uniform INT4 at the same memory. The INT4 kernel improves speed over fp16 at lower quality. Together they describe a Pareto-better point than either uniform INT4 or fp16 serving.
 
 ## Install
 
@@ -19,10 +22,10 @@ pip install ".[ilp]"       # ortools for the CP-SAT joint optimizer
 
 ## How it works
 
-1. **Profile** the model on a calibration corpus. Records which experts activate, how often, and which co-activate across layers.
-2. **Compile** the profile into a routing graph IR. Four passes run over this graph: memory layout (Pass A), quantization assignment (Pass B), prefetch scheduling (Pass C), and layer specialization (Pass D).
-3. **Emit** a compiled artifact (JSON) with per-expert precision assignments, a static prefetch schedule, and layout metadata.
-4. **Serve** with the artifact. ExQ patches SGLang's MoE dispatch to use the INT4 Triton kernel. No predictor runs at inference time.
+1. **Profile** — run the model on a calibration corpus with routing hooks enabled. Records per-expert activation frequency and cross-layer co-activation probability.
+2. **Compile** — the routing profile becomes a graph IR. Four compiler passes assign memory layout (Pass A), per-expert precision (Pass B), prefetch schedules (Pass C), and layer specializations (Pass D).
+3. **Emit** — write a compiled artifact: per-expert precision assignments, a static prefetch schedule, and layout metadata.
+4. **Serve** — ExQ patches SGLang's MoE kernel dispatch to use the INT4 Triton kernel. No prediction model runs at inference time.
 
 ## Usage
 
@@ -32,7 +35,7 @@ pip install ".[ilp]"       # ortools for the CP-SAT joint optimizer
 exq serve --model Qwen/Qwen3-30B-A3B
 ```
 
-Profiles the model if no profile exists, compiles an artifact, applies the ExQ INT4 patch to SGLang, and starts an OpenAI-compatible server on port 30000.
+Profiles (if needed), compiles, patches SGLang, and starts an OpenAI-compatible server on port 30000.
 
 ### Three commands
 
@@ -67,17 +70,17 @@ patch_sglang("artifacts/olmoe.json")
 ### Evaluation scripts
 
 ```bash
-# Perplexity: fp16 vs ExQ vs uniform INT4
+# Perplexity: fp16 vs ExQ vs uniform INT4 (fair quality comparison)
 python scripts/eval_ppl.py --model allenai/OLMoE-1B-7B-0924 \
     --precision rpgo --quant-plan artifacts/olmoe.json --dataset wikitext2
 
 # Compile-time diagnostic: will ExQ help on this model?
 python scripts/exq_diagnose.py --profile profiles/olmoe.json
 
-# INT4 Triton kernel benchmark vs BF16 baseline
+# Kernel speed benchmark: ExQ INT4 vs fp16 baseline (fair speed comparison)
 python scripts/bench_int4.py --model olmoe
 
-# SGLang integration benchmark
+# End-to-end SGLang benchmark
 python scripts/bench_sglang_integration.py --model olmoe
 
 # ILP vs greedy compiler (requires pip install ".[ilp]")
@@ -111,16 +114,69 @@ The Rust core handles the full compiler pipeline. Python handles model loading, 
 
 ## Results
 
-### Decode latency — SGLang integration
+### Contribution 1 — Kernel speed (ExQ INT4 vs fp16, same model)
 
-ExQ patches `UnquantizedFusedMoEMethod.forward_cuda` in SGLang. The patched method dispatches through ExQ's INT4 Triton kernel (packed uint8 weights, on-chip dequantization) instead of SGLang's fp16 fused_experts.
+**Fair baseline:** our fp16 grouped GEMM kernel, same sorted-token dispatch, same hardware.
+The only difference is weight precision: fp16 (2 bytes/param) vs packed INT4 (0.5 bytes/param + scales).
 
-| Model | SGLang fp16 | ExQ INT4 | Δ |
+| Model | fp16 P50 | ExQ INT4 P50 | Δ |
 |---|---|---|---|
-| OLMoE-1B-7B (64 exp, top-2) | 2.393 ms | 1.919 ms | **−19.8%** |
-| Qwen3-30B-A3B (128 exp, top-8) | 3.589 ms | 3.101 ms | **−13.6%** |
+| OLMoE-1B-7B (64 exp, top-2) | 1.173 ms | 0.774 ms | **−34%** |
+| Qwen3-30B-A3B (128 exp, top-8) | 2.044 ms | 1.112 ms | **−46%** |
 
-batch=8, seqlen=64, A10G. 200-run P50. Batch sweep (SGLang integration):
+A10G, batch=8, seqlen=64, 200-run P50. Gains are consistent across batch sizes
+(OLMoE: −34–36%; Qwen3: −45–51%). Source of speedup: weight HBM traffic cut
+by **3.88×** (OLMoE: 256 MB → 66 MB; Qwen3: 384 MB → 99 MB).
+
+This benchmark does not involve SGLang. It compares the two kernels directly.
+
+### Contribution 2 — Quality (ExQ mixed-prec vs uniform INT4, same memory)
+
+**Fair baseline:** uniform INT4 at the same total memory footprint.
+ExQ assigns BF16/INT8 to hot experts and INT4 to cold experts; the memory budget is identical.
+
+Recovery measures what fraction of the fp16→INT4 quality gap ExQ eliminates:
+
+| Model | Type | Recovery | quant_diff | Notes |
+|---|---|---|---|---|
+| OLMoE-1B-7B | MoE | **53.9%** | 0.429 | Strong routing concentration |
+| Qwen2.5-3B | Dense | **66.8%** | 0.377 | |
+| Qwen2.5-1.5B | Dense | **62.2%** | 0.345 | |
+| Qwen1.5-MoE | MoE | 1.4% | 0.010 | Near-uniform routing; no headroom |
+| DeepSeek-V2-Lite | MoE | −0.3% | 0.003 | Near-uniform routing |
+| GLM-4.7-Flash | MoE | −14.2% | 0.119 | INT4 already close to fp16 baseline |
+
+`quant_diff` = fraction of experts at INT8 or BF16. Recovery only materialises when routing is concentrated enough to assign meaningful higher-precision headroom to hot experts. Models with near-uniform routing (low `quant_diff`) see little or no gain.
+
+Output distribution (KL divergence vs fp16, Qwen2.5-3B, WikiText2):
+
+| Method | Mean KL | P99 KL |
+|---|---|---|
+| Uniform INT4 | 0.04138 | 0.35526 |
+| ExQ mixed-prec | **0.01780** | **0.17469** |
+| AWQ (controlled) | 0.12212 | 1.25371 |
+
+ExQ mean KL is **2.3× lower than uniform INT4** and **6.9× lower than AWQ**
+at the same memory budget.
+
+### System-level — ExQ via SGLang vs SGLang fp16
+
+This is not a fair speed comparison (INT4 weights vs fp16 weights). It answers
+a different question: *what does the full system look like if you deploy ExQ
+instead of the default fp16 SGLang setup?* You get lower latency at the cost of
+INT4 weight precision; ExQ's mixed-precision assignment partially recovers that
+quality cost (see Contribution 2 above).
+
+| Model | SGLang fp16 | ExQ INT4 (via SGLang) | Δ |
+|---|---|---|---|
+| OLMoE-1B-7B | 2.393 ms | 1.919 ms | −19.8% |
+| Qwen3-30B-A3B | 3.589 ms | 3.101 ms | −13.6% |
+
+A10G, batch=8, seqlen=64. The gain is smaller than the direct kernel benchmark
+because SGLang's shared dispatch overhead (token sorting, boundary computation)
+is the same for both systems and is not affected by weight precision.
+
+Batch sweep (SGLang integration, best operating points in **bold**):
 
 | Batch | OLMoE Δ | Qwen3 Δ |
 |---|---|---|
@@ -129,49 +185,9 @@ batch=8, seqlen=64, A10G. 200-run P50. Batch sweep (SGLang integration):
 | 4 | **−25.3%** | **−26.5%** |
 | 8 | −20.5% | −13.2% |
 
-### Decode latency — direct INT4 Triton kernel
-
-Measured against the fp16 grouped GEMM baseline, warm Triton cache, 200 runs:
-
-| Model | fp16 | INT4 | Δ |
-|---|---|---|---|
-| OLMoE-1B-7B | 1.173 ms | 0.774 ms | **−34%** |
-| Qwen3-30B-A3B | 2.044 ms | 1.112 ms | **−46%** |
-
-Gains are consistent across batch sizes (OLMoE: −34–36%; Qwen3: −45–51%).
-Weight bandwidth reduction: **3.88×** (fp16 256 MB → INT4+scales 66 MB for OLMoE; 384 MB → 99 MB for Qwen3).
-Kernel correctness: max_diff = 0.0 vs Python dequant reference.
-
-### Output quality — KL divergence
-
-Qwen2.5-3B on WikiText2, measured against fp16 output distribution:
-
-| Method | Mean KL | P99 KL |
-|---|---|---|
-| Uniform INT4 | 0.04138 | 0.35526 |
-| ExQ (ours) | **0.01780** | **0.17469** |
-| AWQ controlled | 0.12212 | 1.25371 |
-
-ExQ mean KL is **6.9× lower than AWQ** and **2.3× lower than uniform INT4**.
-
-### Output quality — PPL recovery
-
-ExQ's frequency-stratified quantization assigns higher precision to frequently-activated experts, recovering a fraction of the quality lost by uniform INT4 at the same memory budget:
-
-| Model | Type | Recovery | quant_diff |
-|---|---|---|---|
-| OLMoE-1B-7B | MoE | **53.9%** | 0.429 |
-| Qwen2.5-3B | Dense | **66.8%** | 0.377 |
-| Qwen2.5-1.5B | Dense | **62.2%** | 0.345 |
-| Qwen1.5-MoE | MoE | 1.4% | 0.010 |
-| DeepSeek-V2-Lite | MoE | −0.3% | 0.003 |
-| GLM-4.7-Flash | MoE | −14.2% | 0.119 |
-
-`quant_diff` = fraction of experts assigned to INT8 or BF16. Recovery tracks `quant_diff`: models where routing is concentrated enough for ExQ to assign meaningful higher-precision headroom see large gains; models with near-uniform routing (low `quant_diff`) see little or no recovery. GLM-4.7-Flash is an outlier — routing is moderately concentrated but INT4 was already close to fp16 quality, leaving little room to recover.
-
 ### Compile time
 
-All models compile under 3 seconds on a single CPU core:
+All models compile in under 3 seconds on a single CPU core:
 
 | Model | Nodes | Compile time |
 |---|---|---|
