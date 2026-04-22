@@ -72,7 +72,7 @@ patch_sglang("artifacts/olmoe.json")
 ```bash
 # Perplexity: fp16 vs ExQ vs uniform INT4 (fair quality comparison)
 python scripts/eval_ppl.py --model allenai/OLMoE-1B-7B-0924 \
-    --precision rpgo --quant-plan artifacts/olmoe.json --dataset wikitext2
+    --precision exq --quant-plan artifacts/olmoe.json --dataset wikitext2
 
 # Compile-time diagnostic: will ExQ help on this model?
 python scripts/exq_diagnose.py --profile profiles/olmoe.json
@@ -141,7 +141,7 @@ does not affect the comparison.
 | 64 | 1.062 ms | 1.183 ms | −11% | 1.715 ms | 1.735 ms | −1% |
 | **128** | 1.893 ms | **1.355 ms** | **+28%** | 1.799 ms | 1.871 ms | −4% |
 | **256** | 1.951 ms | **1.433 ms** | **+27%** | 2.868 ms | **2.150 ms** | **+25%** |
-| **512** | 1.983 ms | **1.571 ms** | **+21%** | 2.934 ms | **2.696 ms** | **+8%** |
+| **512** | 1.983 ms | **1.578 ms** | **+20%** | 2.934 ms | **2.696 ms** | **+8%** |
 
 A10G, seqlen=1 (pure decode), 300-run P50.
 
@@ -160,32 +160,6 @@ config boundary where SGLang's autotuner selects a different block configuration
 **Cross-over point** is determined by `avg_tokens_per_expert`:
 - OLMoE (top-2/64): cross-over at ~4 tokens/expert (batch≥128)
 - Qwen3 (top-8/128): cross-over at ~16 tokens/expert (batch≥256)
-
-
-| Model | Batch | SGLang INT4 | ExQ INT4 | Δ |
-|---|---|---|---|---|
-| OLMoE-1B-7B | 1 | 1.064 ms | 1.403 ms | −32% (ExQ slower) |
-| OLMoE-1B-7B | 2 | 1.885 ms | 1.616 ms | **+14%** |
-| OLMoE-1B-7B | 4 | 1.964 ms | 1.741 ms | **+11%** |
-| OLMoE-1B-7B | 8 | 1.978 ms | 1.865 ms | **+6%** |
-| Qwen3-30B-A3B | 1 | 1.763 ms | 2.081 ms | −18% (ExQ slower) |
-| Qwen3-30B-A3B | 2 | 1.786 ms | 2.207 ms | −24% (ExQ slower) |
-| Qwen3-30B-A3B | 4 | 2.862 ms | 2.466 ms | **+14%** |
-| Qwen3-30B-A3B | 8 | 2.930 ms | 3.063 ms | −5% |
-
-A10G, seqlen=64, 200-run P50.
-
-**At batch≥4, ExQ wins by 6–14%.** The advantage comes from sorted-token
-dispatch, which makes each expert's token slice contiguous in memory and
-eliminates the scatter overhead in SGLang's kernel.
-
-**At batch=1–2, ExQ loses.** SGLang's kernel fuses gate+up+silu+down into a
-single Triton kernel launch. ExQ issues two separate kernel launches (one per
-GEMM), and at very small token counts the per-launch overhead (~0.4 ms each)
-dominates. This is a real trade-off, not a measurement artifact.
-
-The cross-over point is around batch=2–4 depending on model size. For continuous
-batching in production (typical batch 4–16), ExQ wins.
 
 ### Quality — ExQ mixed-prec vs uniform INT4 (same memory)
 
